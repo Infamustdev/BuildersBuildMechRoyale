@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 mechfight-kit.tar.gz
 sim/out/
+HANDOFF.md

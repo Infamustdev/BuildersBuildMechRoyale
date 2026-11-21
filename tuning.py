@@ -10,6 +10,9 @@ MOVE = {
     # Silent movement: the server makes a step sound above sound.step_speed (5 m/s).
     # We creep just under it whenever a threat may be within STEALTH_RADIUS.
     "creep_margin": 0.4,            # m/s below step_speed
+    "flank_circle_p": 0.65,         # chance a strafe flip picks the side that gets behind them
+    "fight_cover_bias": 0.55,       # how hard the strafe bends toward cooler ground
+    "fight_probe_m": 14.0,          # how far ahead that choice looks
     "stealth_radius": 75.0,         # step sounds carry 40 m; keep a safety margin
     # Early round: head for the edge of the next zone circle.
     "early_phase_until": 45.0,      # s; EarlySetup ends at this time or on reaching the camp spot
@@ -137,16 +140,32 @@ TWO_PI = 2 * math.pi
 # of danger is one point of the danger map (a cell an enemy can see close-up costs ~4-7).
 UTIL = {
     "r_cube": 6.0,                  # per cube (clusters add up)
+    "cube_heal_gain": 2.0,          # x3 at 0 HP: a cube heals, so it competes with cover
     "r_weapon_empty": 12.0,         # any weapon while slot 2 is empty
     "r_weapon_upgrade": 3.0,        # per rank of improvement (laser 3 > lightning 2 > mortar 1)
-    "r_crate": 2.5,                 # 1 cube + 50% weapon, but costs shots and makes noise
-    "r_npc": 3.0,                   # 2 cubes, shoots back a little
+    "r_weapon_rank": 4.0,           # per rank of the weapon itself: a laser is worth the walk
+    "contest_span": 80.0,           # metres of head start that makes an item ours
+    "contest_floor": 0.25,          # an item someone is standing on is still worth something
+    # A crate is 300 HP for 1 cube plus a weapon half the time (mortar/laser/lightning equally).
+    # In this file's own currency that is r_cube 6.0 + 0.5 * ~8 for the average weapon = ~10,
+    # discounted for the time spent shooting it and the 220 m noise of it breaking.
+    "r_crate": 7.0,
+    "r_npc": 5.0,                   # 2 cubes, shoots back a little
+    "r_npc_biting": 14.0,           # ...and this much more if it is shooting us right now
     "r_drop": 8.0,                  # 3 cubes + full heal...
     "r_drop_heal": 8.0,             # ...worth more when hurt
     "r_camp": 1.5,                  # the zone-edge spot: where we go when nothing else is worth it
+    "r_explore": 7.0,               # looking at ground we have not seen lately, times how stale
+    "explore_tau": 35.0,            # seconds for a cell to go from fresh to fully stale
+    "explore_cells": 4,             # stalest cells offered as options each replan
+    "hold_decay_s": 6.0,            # a held spot (camp/cover) is worth e-folding less per this
+    "hold_floor": 0.15,             # ...but never quite nothing, so cover still beats open ground
     "cover_hp": 0.5,                # cover is worth nothing above this HP fraction...
     "r_cover_hurt": 16.0,           # ...and up to this at 0 HP
     "r_cover_losing": 4.0,          # extra while losing a fight, only below cover_hp + 0.15
+    "r_fight": 5.0,                 # staying in the fight, times advantage (capped)
+    "fight_adv_cap": 3.0,           # past this the fight is already won; more does not pay more
+    "fight_kill_gain": 2.0,         # x3 against an enemy on its last legs: finish it
     "r_flank": 4.0,                 # times our fight advantage (max 2)
     "flank_dist": 55.0,
     "flank_min_hp": 0.5,
@@ -158,10 +177,30 @@ UTIL = {
     "w_travel": 0.25,               # per second of walking
     "w_zone": 3.0,                  # per 50 m outside the next circle
     "stick_bonus": 1.0,             # hysteresis for the current destination
+    "commit_gain": 3.0,             # ...times this much more once we've closed the whole gap
     "replan_s": 0.5,                # re-score options this often
 }
 
 # Danger map (exp 6): path cost per 4 m cell. Base step cost is 1 per cell.
+# Opening aerial survey. Crates, cubes and pickups spawn randomly each match and are listed
+# only while in line of sight, so a climb at t=0 is the cheapest map-wide census we can get --
+# and the tracker keeps what it sees. Vision is a 120 deg *yaw* wedge with no pitch limit, so
+# one spin (2*pi / turn_rate 4 = 1.6 s) sweeps the whole 200 m circle. Cost: jets are loudness
+# 90, the loudest tier, and we are a silhouette with no cover the whole time.
+SCAN = {
+    "enabled": True,
+    "alt": 32.0,                    # measured: 60 m finds no more items than 30 m does...
+    "energy_floor": 40.0,           # ...so buy the glide cheaply and keep energy for the fight
+    "max_s": 12.0,                  # hard stop, whatever height we reached
+    "abort_hp": 0.97,               # someone is already shooting: get down and fight
+    "min_air_s": 0.5,               # ignore "grounded" for this long after the jump
+    # The descent is free steering: we are already in the air, so pick where to come down.
+    "glide_rays": 16,               # bearings considered for the landing spot
+    "glide_dists": (0.0, 25.0, 50.0, 80.0),
+    "glide_far_cost": 0.8,          # per 100 m, so we only travel for a real improvement
+    "glide_repick_s": 0.4,
+}
+
 DANGER = {
     "view_range": 200.0,            # enemies see this far (vision range)
     "rays": 120,                    # viewshed rays per enemy (3 degrees apart)
@@ -169,12 +208,22 @@ DANGER = {
     "seen_cost": 4.0,               # extra cost of a cell an enemy can see (close end)
     "cone_mult": 1.8,
     "heat_cost": 1.5,               # per unit of sound heat
-    "item_cool": 0.5,               # cheaper cells around items we want
+    "pull_max": 0.85,               # danger counts for only 15% standing on a wanted item...
+    "pull_radius": 24.0,            # ...fading to full price this far out (squared falloff)
+    "pull_items_max": 24,           # nearest N wanted items build the pull wells (cost guard)
+    "pull_bonus": 3.0,              # ...and pay this on top, so a safe item is actively inviting
+    "threat_floor": 0.2,            # a nearly dead mech's sight lines still cost this fraction
+    "exposure_rate": 0.5,           # per second per enemy watching us, added where we stand
+    "exposure_cap": 4.0,            # ...up to this; the squad converges, it does not teleport
+    "exposure_fade_s": 12.0,        # how fast a spot cools once nobody can see us there
+    "exposure_radius": 20.0,        # they converge on roughly where we were, not the exact cell
+    "exposure_cost": 1.5,           # danger per unit of accumulated exposure
     "forget_s": 10.0,               # drop an enemy's viewshed this long after last sighting
     "recast_move": 10.0,            # recompute a viewshed after the enemy moves this far
     "recast_s": 3.0,
     "path_budget_ms": 14.0,
-    "max_recasts_per_tick": 2,      # ~6 ms each; keeps a big group inside the time budget
+    "max_recasts_per_tick": 1,      # ~6 ms each; keeps a big group inside the time budget
+    "line_samples": 20,           # cap probes per route; long options were costing a tick
     "line_cost_max": 2.0,           # straight walk allowed if its total danger is below this
     "loot_max": 3.0,                # an item is "free" if its cell's danger is below this
 }

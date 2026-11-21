@@ -19,9 +19,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mechfight as mf  # noqa: E402
 from combat import Combat  # noqa: E402
 from danger import DangerMap  # noqa: E402
+from recon import Recon  # noqa: E402
 import utility  # noqa: E402
 from tracker import Tracker, angdiff  # noqa: E402
-from tuning import COVER, DANGER, JUDGE, LOOT, MOVE, PROBE, SHOOT, UPGRADE_PRIORITY, UTIL  # noqa: E402
+from tuning import COVER, DANGER, JUDGE, LOOT, MOVE, PROBE, SCAN, SHOOT, UPGRADE_PRIORITY, UTIL  # noqa: E402
 from worldmap import WorldMap  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -51,6 +52,10 @@ class Situation:
         self.adv = 9.0           # fight advantage vs target
         self.multi_angle = False
         self.unseen_dps = 0.0
+        self.n_exposed = 0       # enemies who can see us right now
+        self.threat_bearing = None   # where the last shot at us came from
+        self.npc_dps = 0.0       # damage a drone is doing to us right now
+        self.npc_by = None       # which drone
         self.finish = None
         self.third = None
         self.flank = None
@@ -69,6 +74,10 @@ class Bot:
         self.tr = Tracker(self.wm, cfg)
         self.cb = Combat(cfg, self.wm)
         self.dm = DangerMap(self.wm, self.tr)
+        self.rc = Recon(self.wm)
+        vis = cfg.get("vision", {})
+        self.vis_range = float(vis.get("range", 200.0))
+        self.vis_fov = float(vis.get("fov_deg", 120.0))
         self.pickup_r = cfg.get("loot", {}).get("pickup_radius", 4.0)
         self.step_speed = cfg.get("sound", {}).get("step_speed", 5.0)
         self.front_arc = math.radians(cfg.get("mech", {}).get("front_arc_deg", 180.0)) / 2
@@ -96,6 +105,14 @@ class Bot:
         self.plan = None          # current utility destination (utility.Option)
         self.plan_t = -1e9
         self.plan_key = None
+        self.plan_d0 = 0.0      # how far the current destination was when we chose it
+        self.scan_t0 = None     # opening aerial survey: start time, ground level, done flag
+        self.scan_z0 = 0.0
+        self.scan_done = not SCAN["enabled"]
+        self.scan_top = False
+        self.land_pt = None     # where the descent is steering for
+        self.land_t = -1e9
+        self.hold_t0 = None     # when we last started holding still on a camp/cover spot
         self.loot_target = None
         self.last_target_t = -1e9
         self.idle_t = 0.0
@@ -170,6 +187,14 @@ class Bot:
         visible_ids = {h["tr"].id for h in threats}
         unseen = [a for a in recent if a[1] not in visible_ids and a[3] not in ("npc",)]
         sit.unseen_dps = sum(a[4] for a in unseen) / JUDGE["attack_memory_s"]
+        # Drone fire is kept out of unseen_dps on purpose -- a drone must not make us flee a
+        # mech fight -- but it was then invisible to everything else too, and we would walk
+        # across the map being shot by one without ever looking at it. It damages only us
+        # (the squad is immune), so every point of it is a straight loss, and the drone is
+        # two cubes if we turn around and kill it.
+        npc_hits = [a for a in recent if a[3] == "npc"]
+        sit.npc_dps = sum(a[4] for a in npc_hits) / JUDGE["attack_memory_s"]
+        sit.npc_by = npc_hits[-1][1] if npc_hits else None
         bearings = [a[2] for a in recent if a[2] is not None]
         if len(bearings) >= 2:
             spread = max(abs(angdiff(a, b)) for a in bearings for b in bearings)
@@ -178,6 +203,8 @@ class Bot:
 
         incoming = sum(h["their"] for h in sit.engaged) + sit.unseen_dps
         n_exposed = sum(1 for h in threats if h["los"] and h["d"] < 220 and (h["facing"] or h["engaged"]))
+        sit.n_exposed = n_exposed
+        sit.threat_bearing = bearings[-1] if bearings else None
 
         # pick the target and its advantage
         best, bscore = None, -1e9
@@ -305,6 +332,10 @@ class Bot:
             self.aim_state = "Fighting"
         elif sit.target is not None or st == "Retreating" or st == "Flanking":
             self.aim_state = "LockingOn"
+        elif (sit.unseen_dps > 0 or sit.npc_dps > 0) and sit.threat_bearing is not None:
+            # being shot at by someone we cannot see outranks both looking for loot and the
+            # idle sweep: turn to where it came from, so the next tick can shoot back
+            self.aim_state = "Checking"
         elif self.loot_target is not None:
             self.aim_state = "SearchingItems"
         else:
@@ -637,6 +668,85 @@ class Bot:
                 act["drop"] = 1
 
     # ================================================================ main
+    def hold_mult(self, obs):
+        """What a stand-still spot is still worth, given how long we have held it.
+
+        Its value is in getting there and taking stock, and that is spent once we have. Without
+        this, a spot we already occupy pays no travel while every alternative does, so its score
+        peaks the instant we arrive and nothing can outbid it: the bot parks. Decaying it means
+        the parked state always loses eventually -- to a cube, to a flank, or to going and
+        looking at ground we have not seen.
+        """
+        if self.hold_t0 is None:
+            return 1.0
+        f = UTIL["hold_floor"]
+        return f + (1.0 - f) * math.exp(-(obs["t"] - self.hold_t0) / UTIL["hold_decay_s"])
+
+    def pick_landing(self, obs, px, py):
+        """Where to come down: the coolest cell we can glide to, standing still included.
+
+        `dm.at` already carries everything that matters here -- enemy sight lines weighted by
+        how healthy they are, the sound heat, where we have been seen, and the negative pull of
+        loot nobody is watching -- so the choice is one comparison, not a set of rules.
+        """
+        best, bx, by = None, px, py
+        for i in range(SCAN["glide_rays"]):
+            a = 2.0 * math.pi * i / SCAN["glide_rays"]
+            ca, sa = math.cos(a), math.sin(a)
+            for d in SCAN["glide_dists"]:
+                x, y = px + ca * d, py + sa * d
+                if d > 0.0 and (self.wm.is_solid(x, y) or not self.in_zone_after(obs, x, y, 8.0)):
+                    continue
+                s = self.dm.at(x, y) + SCAN["glide_far_cost"] * d / 100.0
+                if best is None or s < best:
+                    best, bx, by = s, x, y
+        return (bx, by)
+
+    def scan_step(self, obs, sit, act):
+        """Opening aerial survey: jump, jet to SCAN["alt"], spin the whole way up and down.
+
+        Returns True while the survey owns the mech. Crates, cubes and pickups spawn randomly
+        each match and are listed only while in line of sight, so this one climb is the cheapest
+        map-wide census there is, and the tracker keeps what it sees. Vision has no pitch limit,
+        so a single spin from up here sweeps the whole 200 m circle over the rooflines.
+        """
+        if self.scan_done:
+            return False
+        me = obs["self"]
+        t, pz = obs["t"], me["pos"][2]
+        pz2d = (me["pos"][0], me["pos"][1])
+        grounded = me.get("grounded", True)
+        if self.scan_t0 is None:
+            self.scan_t0, self.scan_z0 = t, pz
+        el, alt = t - self.scan_t0, pz - self.scan_z0
+        shot_at = me["hp"] < me.get("max_hp", 1400) * SCAN["abort_hp"]
+        landed = grounded and el > SCAN["min_air_s"]
+        if el > SCAN["max_s"] or shot_at or landed or (sit.engaged and alt < 1.0):
+            self.scan_done = True
+            return False
+        if alt >= SCAN["alt"] or (not grounded and me.get("energy", 0) <= SCAN["energy_floor"]):
+            self.scan_top = True        # latch: never jet again on the way down, it doubles
+        climbing = not self.scan_top
+        if climbing:
+            act["move"] = [0.0, 0.0]                      # straight up: drifting costs height
+        else:
+            # Falling is free steering, and from up here we can see where to come down. The
+            # danger map already prices enemy sight lines, where we have been seen, and the
+            # pull of loot, so the best landing spot is simply its coolest reachable cell.
+            # This is how we leave a spawn that turns out to be surrounded.
+            if self.land_pt is None or t - self.land_t >= SCAN["glide_repick_s"]:
+                self.land_pt, self.land_t = self.pick_landing(obs, pz2d[0], pz2d[1]), t
+            lx, ly = self.land_pt
+            dx, dy = lx - pz2d[0], ly - pz2d[1]
+            n = math.hypot(dx, dy)
+            act["move"] = [round(dx / n, 3), round(dy / n, 3)] if n > 2.0 else [0.0, 0.0]
+        act["boost"] = bool(climbing and not grounded)    # boost in the air fires the jets
+        if grounded:
+            act["jump"] = True
+        act["aim"] = [round(me["aim"][0] + 1.2, 4), 0.0]  # saturated turn rate: a circle in 1.6 s
+        act["fire"] = [False, False]
+        return True
+
     def act(self, obs):
         if PROBE.get("hide"):
             return self.act_hide(obs)
@@ -646,13 +756,32 @@ class Bot:
         px, py, pz = me["pos"]
         self.tr.update(obs)
         sit = self.assess(obs)
-        want = [(c["pos"][0], c["pos"][1]) for c in self.tr.cubes.values()] + \
-               [(p["pos"][0], p["pos"][1]) for p in self.tr.pickups.values()]
+        # stable order, not sorted by distance: the danger map caches its wells on this tuple,
+        # and re-sorting every tick would rebuild them every tick for no gain
+        want = tuple([(c["pos"][0], c["pos"][1]) for c in self.tr.cubes.values()] +
+                     [(p["pos"][0], p["pos"][1]) for p in self.tr.pickups.values()])
+        # back off the refresh after a slow tick: knowledge a fraction of a second staler is
+        # cheap, a missed 50 ms answer is a tick with no shot
+        self.rc.update(t, me["pos"], me["aim"][0], self.vis_range, self.vis_fov,
+                       budget=6 if self.slow else 16)
+        self.dm.mark_exposure(t, me["pos"], sit.n_exposed + (1 if sit.unseen_dps > 0 else 0))
         self.dm.update(t, want)
         camp = self.pick_camp(obs)
         dest = (camp[0], camp[1])
         self.choose_states(obs, sit)
         act = {"tick": obs["tick"]}
+        if self.scan_step(obs, sit, act):
+            self.move_state, self.aim_state = "Surveying", "Scanning"
+            self.take_and_pick(obs, act)
+            self.state_time["Surveying"] = self.state_time.get("Surveying", 0) + 1
+            mf.draw.label(f"SCAN alt{me['pos'][2] - self.scan_z0:4.0f} e{me.get('energy', 0):3.0f}"
+                          + ("" if self.land_pt is None else " ->land"))
+            if self.dump is not None and t - self.dump_t >= 0.5:
+                self.dump_t = t
+                self.write_mind(obs, t)
+            self.max_ms = max(self.max_ms, (time.perf_counter() - t0) * 1000)
+            self.n_ticks += 1
+            return act
         st = self.move_state
         mx = my = 0.0
         jump = False
@@ -661,46 +790,66 @@ class Bot:
         zone_forced = sit.outside or sit.zone_need > walk * MOVE["zone_boost_ratio"]
 
         # ---------------- movement
-        if st not in ("Fighting", "Finishing") and not zone_forced:
-            # utility planner: one score decides loot / cover / flank / camp
+        # The planner runs in a fight too: "keep fighting this one" is an option scored against
+        # the cubes on the ground, not a state that switches the planner off. Aiming and firing
+        # are decided further down regardless, so walking to loot never costs us our shots.
+        fight_st = st in ("Fighting", "Finishing")
+        if zone_forced and not fight_st:
+            self.move_state = st = "Rotating"
+            self.hold_t0 = None
+            self.loot_target = None
+            self.loot_state = "zone"
+            mx, my = self.follow(obs, *dest)
+            self.shoot_aim_states(sit)
+        else:
+            # utility planner: one score decides fight / loot / cover / flank / look / camp
             if self.plan is None or t - self.plan_t >= UTIL["replan_s"]:
                 best, _ = utility.plan(self, obs, sit, camp)
-                self.plan, self.plan_t = best, t
-                self.plan_key = best.key if best else None
+                key = best.key if best else None
+                if key != self.plan_key:
+                    self.plan_d0 = math.hypot(best.x - px, best.y - py) if best else 0.0
+                self.plan, self.plan_t, self.plan_key = best, t, key
             o = self.plan
             self.loot_target = None
-            if o is not None:
+            if o is not None and o.kind != "fight":
                 dist = math.hypot(o.x - px, o.y - py)
                 if o.item is not None:
                     self.loot_target = (o.kind, o.item[1], (o.x, o.y, o.z), dist)
                 self.move_state = {"cover": "Retreating", "flank": "Flanking"}.get(o.kind, "Rotating")
                 self.loot_state = o.kind
+                on_spot = o.kind in ("camp", "cover") and dist < MOVE["arrive_radius"]
+                if not on_spot:
+                    self.hold_t0 = None
+                elif self.hold_t0 is None:
+                    self.hold_t0 = t
                 hold = ((o.kind in ("crate", "npc") and dist < LOOT["crate_engage_dist"])
-                        or (o.kind == "drop" and dist < 4.0)
-                        or (o.kind in ("camp", "cover") and dist < MOVE["arrive_radius"]))
+                        or (o.kind == "drop" and dist < 4.0) or on_spot)
                 if not hold:
                     mx, my = self.follow(obs, o.x, o.y, replan_s=1.5)
                 if o.kind == "camp" and dist < MOVE["arrive_radius"]:
                     self.reached_camp = True
-            st = self.move_state
-            self.shoot_aim_states(sit)
-        elif zone_forced and st not in ("Fighting", "Finishing"):
-            self.move_state = st = "Rotating"
-            self.loot_target = None
-            self.loot_state = "zone"
-            mx, my = self.follow(obs, *dest)
-            self.shoot_aim_states(sit)
-        elif st in ("Fighting", "Finishing"):
-            h = sit.finish if (st == "Finishing" and sit.finish is not None) else (sit.third if st == "Finishing" and sit.third else target)
-            if h is not None:
-                res = None
-                if st == "Fighting" and h["d"] >= COVER["min_target_dist"]:
-                    res = self.cover_move(obs, sit, h)
-                if res is not None:
-                    mx, my, jump = res
-                else:
-                    self.cover = None
-                    mx, my, jump = self.fight_move(obs, h, chase=(st == "Finishing"))
+                st = self.move_state
+                self.shoot_aim_states(sit)
+            else:
+                # the fight won the comparison, or there is nothing else worth doing
+                self.hold_t0 = None
+                has_t = sit.finish is not None or target is not None
+                if not fight_st and has_t:
+                    self.move_state = st = "Finishing" if sit.finish is not None else "Fighting"
+                self.loot_state = "fight" if has_t else "camp"
+                h = sit.finish if (st == "Finishing" and sit.finish is not None) else (sit.third if st == "Finishing" and sit.third else target)
+                if h is None:
+                    mx, my = self.follow(obs, *dest)   # nothing to fight and nothing to want
+                    self.shoot_aim_states(sit)
+                if h is not None:
+                    res = None
+                    if st == "Fighting" and h["d"] >= COVER["min_target_dist"]:
+                        res = self.cover_move(obs, sit, h)
+                    if res is not None:
+                        mx, my, jump = res
+                    else:
+                        self.cover = None
+                        mx, my, jump = self.fight_move(obs, h, chase=(st == "Finishing"))
         scale, boost = self.speed_mode(obs, sit)
         if st not in ("Fighting", "Finishing"):
             mx, my = self.avoid_walls(px, py, mx, my)
@@ -908,6 +1057,25 @@ class Bot:
         mx, my = self.follow(obs, gx, gy, replan_s=1.0)
         return mx, my, False
 
+    def safer_step(self, px, py, sx, sy):
+        """Of the few spots a step away on the side we are already circling, the coolest.
+
+        Fighting from one spot and strafing in place is what a target does. This gives the
+        strafe somewhere to go: the same circle, biased toward whichever part of it the
+        danger map likes -- cover, a building's shadow, away from where we have been seen.
+        """
+        best, bx, by = None, 0.0, 0.0
+        base = math.atan2(sy, sx)
+        for da in (-0.9, -0.45, 0.0, 0.45, 0.9):
+            a = base + da
+            qx, qy = px + math.cos(a) * MOVE["fight_probe_m"], py + math.sin(a) * MOVE["fight_probe_m"]
+            if self.wm.is_solid(qx, qy):
+                continue
+            c = self.dm.at(qx, qy)
+            if best is None or c < best:
+                best, bx, by = c, math.cos(a), math.sin(a)
+        return bx, by
+
     def fight_move(self, obs, h, chase=False):
         """Strafe perpendicular to the target, drift back, random flips and jumps; chase when finishing."""
         me = obs["self"]
@@ -916,7 +1084,15 @@ class Bot:
         e = h["tr"]
         b = math.atan2(e.pos[1] - py, e.pos[0] - px)
         if t >= self.strafe_until:
-            self.strafe = -self.strafe if self.rng.random() < 0.7 else self.strafe
+            # Not a coin flip: a back hit does rear_mult damage, so one side of the circle is
+            # worth more than the other. Pick the way that walks us around behind their aim,
+            # and keep some randomness so we are not a predictable orbit.
+            off = angdiff(b + math.pi, e.aim[0])     # where we sit relative to their facing
+            prefer = 1.0 if off > 0 else -1.0
+            if self.rng.random() < MOVE["flank_circle_p"]:
+                self.strafe = prefer
+            else:
+                self.strafe = -self.strafe if self.rng.random() < 0.7 else self.strafe
             self.strafe_until = t + self.rng.uniform(MOVE["strafe_flip_min"], MOVE["strafe_flip_max"])
         side = b + self.strafe * math.pi / 2
         sx, sy = math.cos(side), math.sin(side)
@@ -935,6 +1111,10 @@ class Bot:
             if h["d"] > reach and reach > 0:
                 back = 0.5
             mx, my = sx + math.cos(b) * back, sy + math.sin(b) * back
+            # pull the circle toward ground they cannot see us from: the strafe decides the
+            # side, the danger map decides which part of that side is worth standing on
+            gx, gy = self.safer_step(px, py, sx, sy)
+            mx, my = mx + gx * MOVE["fight_cover_bias"], my + gy * MOVE["fight_cover_bias"]
         mx, my = unit(mx, my)
         # don't strafe into walls or out of the zone
         if self.wm.is_solid(px + mx * 4, py + my * 4) or not self.in_zone_after(obs, px + mx * 8, py + my * 8):
@@ -952,6 +1132,11 @@ class Bot:
         fire = [False, False]
         reload = False
         aim = [cur_yaw + 1.2, 0.0]  # default: scan (spin at full turn rate)
+        if self.aim_state == "Checking" and sit.threat_bearing is not None:
+            # swing to the shot's bearing rather than sweeping past it, but keep sweeping
+            # slowly once we are pointed there so we still pick things up
+            off = angdiff(sit.threat_bearing, cur_yaw)
+            aim = [cur_yaw + (off if abs(off) > 0.25 else 0.35), 0.0]
         weapons = me.get("weapons") or [None, None]
 
         target = None
@@ -1044,12 +1229,14 @@ class Bot:
         for v in self.dm.views.values():
             cells.update(v["cells"].keys())
         cells.update(self.tr.heat.keys())
-        cells.update(self.dm.cool.keys())
+        cells.update(self.dm.pull.keys())
+        # [cell, final cost, pull fraction]: the viewer paints cost red and pull light blue,
+        # so the discount around items is visible even where the cost it cancels was large.
         danger = []
         for K in cells:
-            c = self.dm.cost(K)
-            if c > 0.05:
-                danger.append([K, round(c, 1)])
+            c, p = self.dm.signed(K), self.dm.pull.get(K, 0.0)
+            if abs(c) > 0.05 or p > 0.02:
+                danger.append([K, round(c, 1), round(p, 2)])
         heat = [[K, round(self.tr.heat_at_cell(K), 2)] for K in self.tr.heat if self.tr.heat_at_cell(K) > 0.05]
         tracks = [[round(e.pos[0], 1), round(e.pos[1], 1), round(t - e.seen_t, 1), e.id]
                   for e in self.tr.tracks.values() if e.kind == "mech" and t - e.seen_t < 15]
