@@ -82,7 +82,7 @@ SHOOT = {
     "pred_noise": 0.5,              # fraction of possible target dodge we can't predict (judgement only)
     "target_accel": 58.5,           # ground accel of a mech (config.mech.ground_accel)
     "laser_release_charge": 0.97,   # release at this fraction of full charge
-    "laser_max_hold_lost": 1.0,     # s to keep a charge after losing the target
+    "laser_max_hold_lost": 1.6,     # s to keep a charge after losing the target (covers the step out of cover)
     "lightning_energy_reserve": 25.0,
     "mortar_min_dist": 22.0,        # self-splash is 50%; stay clear
     "mortar_max_dist": 225.0,
@@ -133,5 +133,22 @@ TWO_PI = 2 * math.pi
 #       move only to stay inside the zone. Its practice score shows whether house bots die
 #       without us (e.g. to the zone): ~0 means practice points come only from our kills.
 PROBE = {
-    "hide": True,
+    "hide": False,                  # P1 scored 0.04: house bots never die without our kills
+}
+
+# Cover fighting (exp 4): peek out, shoot, duck back behind a wall, reload/charge/heal, repeat.
+COVER = {
+    "hide_radii": [5.0, 9.0, 14.0, 20.0, 28.0],
+    "peek_radii": [3.0, 5.0, 7.5, 10.0],
+    "angles": 12,
+    "replan_s": 1.5,
+    "target_move_replan": 15.0,     # re-plan if the target moved this far since planning
+    "peek_max_s": 3.0,              # longest single peek
+    "peek_dmg": 220.0,              # duck back after taking this much damage in one peek
+    "hide_min_s": 0.8,
+    "hide_max_s": 8.0,
+    "heal_to": 0.55,                # while hidden, wait for regen up to this HP fraction (if below)
+    "reload_frac": 0.7,             # peek again once the gun has this fraction of its magazine
+    "min_target_dist": 18.0,        # closer than this, just fight (cover won't help)
+    "adv_bonus": 1.6,               # fight advantage multiplier when a cover plan exists
 }

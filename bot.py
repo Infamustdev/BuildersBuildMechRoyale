@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mechfight as mf  # noqa: E402
 from combat import Combat  # noqa: E402
 from tracker import Tracker, angdiff  # noqa: E402
-from tuning import JUDGE, LOOT, MOVE, PROBE, SHOOT, UPGRADE_PRIORITY  # noqa: E402
+from tuning import COVER, JUDGE, LOOT, MOVE, PROBE, SHOOT, UPGRADE_PRIORITY  # noqa: E402
 from worldmap import WorldMap  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -88,6 +88,7 @@ class Bot:
         self.retreat_pt = None
         self.retreat_t = -1e9
         self.last_danger_t = -1e9
+        self.cover = None         # active peek-shoot-hide plan
         self.loot_target = None
         self.last_target_t = -1e9
         self.idle_t = 0.0
@@ -222,16 +223,20 @@ class Bot:
         retreat_now = False
         low = sit.hp_frac < JUDGE["low_hp_frac"]
         danger = bool(sit.engaged) or sit.unseen_dps > 0
+        # fighting from cover takes far less damage: count that in the retreat decision
+        adv = sit.adv
+        if self.cover is not None and sit.target is not None and self.cover["tid"] == sit.target["tr"].id:
+            adv *= COVER["adv_bonus"]
         if danger:
             self.last_danger_t = t
-            if sit.finish is None and (sit.adv < JUDGE["flee_adv"] or (low and sit.adv < JUDGE["low_hp_flee_adv"])
+            if sit.finish is None and (adv < JUDGE["flee_adv"] or (low and adv < JUDGE["low_hp_flee_adv"])
                                        or (sit.multi_angle and len(sit.engaged) + (1 if sit.unseen_dps > 0 else 0) >= 2)):
                 retreat_now = True
         if prev == "Retreating" and not retreat_now:
             # hysteresis: stay hidden until healed, unless the fight turned clearly winnable
             healed = sit.hp_frac >= MOVE["retreat_done_hp"] and (t - self.last_danger_t) > 2.0
             can_win = (sit.target is not None and sit.target["engaged"] and not low
-                       and sit.adv > JUDGE["flee_adv"] + JUDGE["flee_hysteresis"])
+                       and adv > JUDGE["flee_adv"] + JUDGE["flee_hysteresis"])
             if not healed and not can_win and sit.finish is None:
                 retreat_now = True
         if st is None:
@@ -254,6 +259,8 @@ class Bot:
         if st == "Retreating" and prev != "Retreating":
             self.retreat_pt = None
             self.retreat_t = -1e9
+        if st != "Fighting":
+            self.cover = None
         self.move_state = st
 
         # shooting state
@@ -662,7 +669,14 @@ class Bot:
         elif st in ("Fighting", "Finishing"):
             h = sit.finish if (st == "Finishing" and sit.finish is not None) else (sit.third if st == "Finishing" and sit.third else target)
             if h is not None:
-                mx, my, jump = self.fight_move(obs, h, chase=(st == "Finishing"))
+                res = None
+                if st == "Fighting" and h["d"] >= COVER["min_target_dist"]:
+                    res = self.cover_move(obs, sit, h)
+                if res is not None:
+                    mx, my, jump = res
+                else:
+                    self.cover = None
+                    mx, my, jump = self.fight_move(obs, h, chase=(st == "Finishing"))
         if st not in ("Fighting", "Finishing"):
             mx, my = self.avoid_walls(px, py, mx, my)
         # stuck detection
@@ -748,6 +762,122 @@ class Bot:
             self.climb = None
         return dx, dy, jump, boost
 
+    # ================================================================ cover fighting
+    def plan_cover(self, obs, sit, h):
+        """Find a hide spot H (target can't see us) and the nearest peek spot P next to it
+        (our muzzle sees the target). None if there's no usable cover nearby."""
+        me = obs["self"]
+        px, py = me["pos"][0], me["pos"][1]
+        e = h["tr"]
+        E = (e.pos[0], e.pos[1], e.pos[2] + 8.0)
+        others = [(o["tr"].pos[0], o["tr"].pos[1], o["tr"].pos[2] + 8.0)
+                  for o in sit.threats if o is not h and o["los"] and o["d"] < 200]
+        A = COVER["angles"]
+        best, bs = None, -1e9
+        for r in COVER["hide_radii"]:
+            for k in range(A):
+                a = 2 * math.pi * k / A
+                K = self.wm.nearest_open(px + math.cos(a) * r, py + math.sin(a) * r, 1)
+                if K < 0:
+                    continue
+                x, y = self.wm.ncenter(K)
+                if not self.in_zone_after(obs, x, y):
+                    continue
+                g = self.wm.ground_at(x, y)
+                if self.wm.los(E, (x, y, g + 4.5)) or self.wm.los(E, (x, y, g + 8.5)):
+                    continue  # target could see us there
+                hid = sum(1 for O in others if not self.wm.los(O, (x, y, g + 6.0)))
+                dT = math.hypot(x - e.pos[0], y - e.pos[1])
+                s = -r / 6.0 + 1.5 * hid - abs(dT - h["d"]) / 40.0
+                if dT < COVER["min_target_dist"]:
+                    s -= 2.0
+                if s > bs:
+                    bs, best = s, (x, y)
+        if best is None:
+            return None
+        hx, hy = best
+        C = (e.pos[0], e.pos[1], e.pos[2] + 4.5)
+        for r in COVER["peek_radii"]:
+            for k in range(A):
+                a = 2 * math.pi * k / A
+                x, y = hx + math.cos(a) * r, hy + math.sin(a) * r
+                K = self.wm.nidx(x, y)
+                if K < 0 or self.wm.nblock[K] or not self.wm.walk_clear(hx, hy, x, y):
+                    continue
+                if self.wm.los((x, y, self.wm.ground_at(x, y) + 7.0), C):
+                    return {"tid": e.id, "H": (hx, hy), "P": (x, y), "tpos": tuple(e.pos), "t": obs["t"],
+                            "phase": "peek", "ps": obs["t"], "hs": obs["t"], "dmg": 0.0}
+        return None
+
+    def cover_move(self, obs, sit, h):
+        """Peek-shoot-hide loop against target h. Returns (mx, my, jump) or None (no cover: strafe)."""
+        t = obs["t"]
+        me = obs["self"]
+        px, py = me["pos"][0], me["pos"][1]
+        e = h["tr"]
+        cv = self.cover
+        replan = (cv is None or cv["tid"] != e.id
+                  or math.hypot(e.pos[0] - cv["tpos"][0], e.pos[1] - cv["tpos"][1]) > COVER["target_move_replan"]
+                  or (t - cv["t"] > COVER["replan_s"] and not self.slow))
+        if replan:
+            new = self.plan_cover(obs, sit, h)
+            if new is None:
+                if cv is None or cv["tid"] != e.id:
+                    return None
+                cv["t"] = t  # keep the old plan a little longer
+            else:
+                if cv is not None and cv["tid"] == e.id:
+                    for k in ("phase", "ps", "hs", "dmg"):
+                        new[k] = cv[k]
+                cv = self.cover = new
+        # phase changes
+        weapons = me.get("weapons") or [None, None]
+        gun = next((w for w in weapons if w and w["kind"] == "gun"), None)
+        laser = next((w for w in weapons if w and w["kind"] == "laser"), None)
+        mag = gun.get("stats", {}).get("mag", 12) if gun else 12
+        ammo = gun.get("ammo", mag) if gun else mag
+        reloading = bool(gun and gun.get("reload", 0) > 0)
+        dmg = sum(ev.get("amount", 0.0) for ev in obs.get("events", [])
+                  if ev.get("type") == "damaged" and ev.get("weapon") != "zone")
+        if cv["phase"] == "peek":
+            cv["dmg"] += dmg
+            fired_laser = bool(laser and laser.get("cooldown", 0) > 0.0 and (laser.get("charge") or 0) == 0
+                               and laser["cooldown"] > laser.get("stats", {}).get("cooldown", 1.65) - 0.15)
+            if (ammo <= 0 or reloading or cv["dmg"] >= COVER["peek_dmg"] or t - cv["ps"] > COVER["peek_max_s"]
+                    or sit.hp_frac < JUDGE["low_hp_frac"] or (fired_laser and ammo < mag * 0.5)):
+                cv["phase"], cv["hs"] = "hide", t
+        else:
+            hidden_for = t - cv["hs"]
+            healed = sit.hp_frac >= COVER["heal_to"] or hidden_for > COVER["hide_max_s"] * 0.6
+            ready = (not reloading and ammo >= mag * COVER["reload_frac"]
+                     and hidden_for >= COVER["hide_min_s"] and healed)
+            if laser and laser.get("cooldown", 0) <= 0:
+                # charge the laser behind cover, then step out and release
+                full = laser.get("stats", {}).get("charge", 0.75)
+                ready = ready and (laser.get("charge") or 0) >= full * SHOOT["laser_release_charge"]
+            if ready or hidden_for > COVER["hide_max_s"]:
+                cv["phase"], cv["ps"], cv["dmg"] = "peek", t, 0.0
+        # movement
+        gx, gy = cv["P"] if cv["phase"] == "peek" else cv["H"]
+        d = math.hypot(gx - px, gy - py)
+        jump = False
+        if cv["phase"] == "peek" and d < 2.5:
+            # small strafe around the peek spot so we're not a still target
+            if t >= self.strafe_until:
+                self.strafe = -self.strafe
+                self.strafe_until = t + self.rng.uniform(MOVE["strafe_flip_min"], MOVE["strafe_flip_max"])
+            b = math.atan2(e.pos[1] - py, e.pos[0] - px) + self.strafe * math.pi / 2
+            mx, my = math.cos(b) * 0.6, math.sin(b) * 0.6
+            if self.wm.is_solid(px + mx * 4, py + my * 4):
+                mx, my = -mx, -my
+            jump = (me.get("grounded") and me.get("energy", 0) > MOVE["jump_energy_min"]
+                    and self.rng.random() < MOVE["jump_chance"] * 0.5)
+            return mx, my, jump
+        if d < 1.2:
+            return 0.0, 0.0, False
+        mx, my = self.follow(obs, gx, gy, replan_s=1.0)
+        return mx, my, False
+
     def fight_move(self, obs, h, chase=False):
         """Strafe perpendicular to the target, drift back, random flips and jumps; chase when finishing."""
         me = obs["self"]
@@ -810,6 +940,20 @@ class Bot:
         if target is not None:
             e = target["tr"]
             s = self.cb.shot(me, e.pos, e.vel, e.cubes, "mech")
+            cv = self.cover
+            if cv is not None and cv["phase"] == "hide" and cv["tid"] == e.id and self.move_state == "Fighting":
+                # behind cover: pre-aim at the target, reload, charge the laser for the next peek
+                aim = [s.yaw, s.pitch]
+                for i, w in enumerate(weapons[:2]):
+                    if not w:
+                        continue
+                    if w["kind"] == "gun":
+                        mag = w.get("stats", {}).get("mag", 12)
+                        reload = w.get("reload", 0) <= 0 and w.get("ammo", mag) < mag
+                    elif w["kind"] == "laser":
+                        fire[i] = w.get("cooldown", 0) <= 0 and t >= self.cb.short_until
+                self.last_target_t = t
+                return aim, fire, reload
             if s.los:
                 aim, fire, reload = self.cb.triggers(me, s, mode, t, obs.get("events", []))
                 self.last_target_t = t
