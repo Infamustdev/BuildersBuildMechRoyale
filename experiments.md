@@ -10,9 +10,9 @@ latest commit on `main`). Limit: 4 per hour, one queued at a time.
 | # | Commit | Change vs baseline | Score | Notes |
 |---|--------|--------------------|-------|-------|
 | 0 | f79563a | Baseline (flee_adv 0.6, low-HP flee below 1.3, min_hit_prob 0.65) | 2.58 | Starter = 1.15 |
-| 2 | aggressive | flee_adv 0.6→0.4, low_hp_flee_adv 1.3→0.9 | | Flee less, stay in fights |
-| 1 | (re-push of baseline) | Same code as #0, measures noise | | Run after #2 by reverting tuning.py |
-| 3 | | min_hit_prob 0.65→0.45 | | More shots at range |
+| 2 | 7aa57c2 | flee_adv 0.6→0.4, low_hp_flee_adv 1.3→0.9 | 2.38 | Worse or noise; reverted |
+| 3 | (this push) | Baseline retreat; no hit-chance threshold: fire every lined-up shot; auto-lock onto any visible enemy in range | | Recorded match: 66 fire decisions vs 46 |
+| 1 | (re-push of baseline) | Same code as #0, measures noise | | Optional |
 | 4 | | Retreat only below 25% HP | | |
 | 5 | | w_roof 1.2→0 (no roofs) | | |
 | 6 | | finish_hp_frac 0.25→0.4, finish_max_dist 140→200 | | |

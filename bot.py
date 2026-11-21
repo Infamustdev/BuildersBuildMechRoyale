@@ -43,6 +43,7 @@ class Situation:
     def __init__(self):
         self.threats = []        # list of dicts (see assess)
         self.target = None       # best enemy to shoot at
+        self.lock = None         # auto-lock: best visible enemy in line of sight and range
         self.engaged = []        # enemies fighting us
         self.adv = 9.0           # fight advantage vs target
         self.multi_angle = False
@@ -174,6 +175,15 @@ class Bot:
             if score > bscore:
                 bscore, best = score, h
         sit.target = best
+        # auto-lock: any enemy mech we can see and hit; prefer attackers, low HP, then closest
+        lk, lscore = None, -1e9
+        for h in threats:
+            if not h["los"] or h["d"] > SHOOT["lock_range"]:
+                continue
+            sc = (3.0 if h["attacking"] else 0.0) + 2.0 * (1.0 - h["hp_frac"]) - h["d"] / 60.0
+            if sc > lscore:
+                lscore, lk = sc, h
+        sit.lock = lk
         if best is not None:
             sit.adv = best.get("adv", 1.0)
             fin = (best["hp"] <= JUDGE["finish_hp_abs"] or best["hp_frac"] <= JUDGE["finish_hp_frac"])
@@ -253,8 +263,8 @@ class Bot:
             self.shoot_state = "Fighting"
         elif sit.third is not None:
             self.shoot_state = "ThirdPartying"
-        elif st == "Flanking" and sit.flank is not None and sit.flank["we_rear"] and sit.flank["d"] < 130:
-            self.shoot_state = "Fighting"  # opening shot from behind
+        elif sit.lock is not None:
+            self.shoot_state = "Fighting"  # auto-lock: shoot any enemy we can see and hit
         elif self.loot_target is not None and self.loot_target[0] in ("crate", "npc"):
             self.shoot_state = "Looting"
         else:
@@ -752,7 +762,12 @@ class Bot:
         elif self.shoot_state == "ThirdPartying" and sit.third is not None:
             target, mode = sit.third, "third"
         elif self.shoot_state == "Fighting":
-            target, mode = (sit.flank if self.move_state == "Flanking" and sit.flank else sit.target), "fight"
+            # the judged target if we can hit it, otherwise whatever we're locked onto
+            if sit.target is not None and sit.target["los"] and sit.target["d"] <= SHOOT["lock_range"]:
+                target = sit.target
+            else:
+                target = sit.lock or sit.target
+            mode = "fight"
         if target is not None:
             e = target["tr"]
             s = self.cb.shot(me, e.pos, e.vel, e.cubes, "mech")

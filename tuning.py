@@ -52,8 +52,8 @@ MOVE = {
 JUDGE = {
     # Fight advantage A = (time they need to kill us) / (time we need to kill them).
     # An engaged enemy is fought unless one of the retreat rules below fires.
-    "flee_adv": 0.4,                # below this, retreat (exp 2: was 0.6)
-    "low_hp_flee_adv": 0.9,         # at low HP, retreat below this advantage (exp 2: was 1.3)
+    "flee_adv": 0.6,                # below this, retreat (exp 2 tried 0.4: 2.38 vs 2.58)
+    "low_hp_flee_adv": 1.3,         # at low HP, retreat below this advantage (exp 2 tried 0.9)
     "flee_hysteresis": 0.4,         # leave a retreat to fight only above flee_adv + this
     "engage_memory_s": 3.0,         # an enemy stays "engaged" this long after the last sign
     "flank_min_adv": 1.2,           # only go hunting/flanking when clearly stronger
@@ -75,18 +75,17 @@ JUDGE = {
 
 # ---------------------------------------------------------------- shooting
 SHOOT = {
-    "min_hit_prob": 0.65,           # the 65% rule
-    "finish_hit_prob": 0.50,        # relaxed when finishing a kill
-    "crate_hit_prob": 0.80,
-    "pred_noise": 0.5,              # fraction of possible target dodge we can't predict
+    # No hit-chance threshold (exp 3): fire whenever the shot is lined up, i.e. in range, line of
+    # sight, and the torso (after this tick's slew) points inside the target's silhouette.
+    "lineup_frac": 1.0,             # fraction of the target's angular half-width that counts as lined up
+    "lock_range": 230.0,            # auto-lock onto any visible enemy mech within this range
+    "pred_noise": 0.5,              # fraction of possible target dodge we can't predict (judgement only)
     "target_accel": 58.5,           # ground accel of a mech (config.mech.ground_accel)
     "laser_release_charge": 0.97,   # release at this fraction of full charge
-    "laser_min_prob": 0.70,
     "laser_max_hold_lost": 1.0,     # s to keep a charge after losing the target
     "lightning_energy_reserve": 25.0,
     "mortar_min_dist": 22.0,        # self-splash is 50%; stay clear
     "mortar_max_dist": 225.0,
-    "mortar_min_prob": 0.45,
     "reload_frac": 0.4,             # reload early below this ammo fraction when idle
     "idle_reload_s": 1.5,
 }

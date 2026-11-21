@@ -20,7 +20,8 @@ def erf(x):
 class Shot:
     """Result of aiming at a target: where to point and how likely each weapon hits."""
     __slots__ = ("yaw", "pitch", "d", "flight", "p_gun", "p_laser", "p_light", "p_mortar",
-                 "mortar_aim", "los", "point")
+                 "mortar_aim", "los", "point", "gun_lined", "laser_aim", "laser_lined", "in_gun_range",
+                 "in_laser_range")
 
     def __init__(self):
         self.yaw = self.pitch = 0.0
@@ -30,6 +31,9 @@ class Shot:
         self.mortar_aim = None
         self.los = False
         self.point = None
+        self.gun_lined = self.laser_lined = False
+        self.in_gun_range = self.in_laser_range = False
+        self.laser_aim = None
 
 
 class Combat:
@@ -128,11 +132,20 @@ class Combat:
         bl = math.hypot(bx, by) or 1.0
         lat = abs(tvel[0] * (-by / bl) + tvel[1] * (bx / bl))
         rng = gun.get("range", 230.0)
-        if s.los and s.d <= rng:
+        frac = SHOOT["lineup_frac"]
+        s.in_gun_range = s.d <= rng
+        if s.los and s.in_gun_range:
             s.p_gun = self.p_projectile(s.d, ft, lat, ey, ep, gun.get("spread_deg", 0.6), radius, half_h)
+            s.gun_lined = ey <= math.atan(radius * frac / s.d) and ep <= math.atan(half_h * frac / s.d)
         lz = W.get("laser", {})
-        if s.los and s.d <= lz.get("range", 280.0):
-            s.p_laser = self.p_projectile(s.d, 0.1, lat, ey, ep, 0.05, radius, half_h)
+        # laser is hitscan: lead only by the ~0.1 s until the release lands
+        lp, _ = self.lead(o, tpos, tvel, 1e9, cubes, kind, extra_t=0.1)
+        s.laser_aim = self.yaw_pitch(o, lp)
+        s.in_laser_range = s.d <= lz.get("range", 280.0)
+        if s.los and s.in_laser_range:
+            ly, lpp = self.aim_error(me, s.laser_aim[0], s.laser_aim[1])
+            s.p_laser = self.p_projectile(s.d, 0.1, lat, ly, lpp, 0.05, radius, half_h)
+            s.laser_lined = ly <= math.atan(radius * frac / s.d) and lpp <= math.atan(half_h * frac / s.d)
         lt = W.get("lightning", {})
         if s.los and s.d <= lt.get("range", 45.0) * 0.95:
             off = abs(angdiff(s.yaw, me["aim"][0]))
@@ -258,11 +271,6 @@ class Combat:
         for e in events:
             if e.get("type") == "effect" and e.get("effect") == "short":
                 self.short_until = t + self.W.get("lightning", {}).get("short_s", 2.0)
-        thr = SHOOT["min_hit_prob"]
-        if mode == "finish":
-            thr = SHOOT["finish_hit_prob"]
-        elif mode == "crate":
-            thr = SHOOT["crate_hit_prob"]
         weapons = me.get("weapons") or [None, None]
         fire = [False, False]
         aim = [s.yaw, s.pitch]
@@ -273,9 +281,9 @@ class Combat:
 
         # mortar: only when it's the best option (target behind cover or out of gun reach)
         use_mortar = False
-        if "mortar" in kinds and s.mortar_aim is not None and mode in ("fight", "finish", "third"):
+        if "mortar" in kinds and s.mortar_aim is not None and s.mortar_aim[3] and mode in ("fight", "finish", "third"):
             i, w = kinds["mortar"]
-            if w.get("cooldown", 0) <= 0 and s.p_mortar >= SHOOT["mortar_min_prob"] and (not s.los or s.p_gun < thr):
+            if w.get("cooldown", 0) <= 0 and (not s.los or not s.in_gun_range):
                 use_mortar = True
         if use_mortar:
             i, w = kinds["mortar"]
@@ -292,14 +300,15 @@ class Combat:
             charge = w.get("charge", 0.0) or 0.0
             full = w.get("stats", {}).get("charge", 0.75)
             if charge > 0:
-                lead_pt = (s.point[0], s.point[1], s.point[2]) if s.point else None
-                if s.los and s.p_laser > 0:
+                if s.los and s.in_laser_range:
                     self.laser_lost_since = None
                     if charge >= full * SHOOT["laser_release_charge"]:
+                        # about to release: point at the hitscan lead, not the bullet lead
+                        aim = [s.laser_aim[0], s.laser_aim[1]]
                         if self.laser_full_since is None:
                             self.laser_full_since = t
                         held = t - self.laser_full_since
-                        if s.p_laser >= SHOOT["laser_min_prob"] or held > self.W["laser"].get("hold_s", 2.0) - 0.3:
+                        if s.laser_lined or held > self.W["laser"].get("hold_s", 2.0) - 0.3:
                             fire[i] = False  # release -> fires
                             self.laser_full_since = None
                         else:
@@ -315,8 +324,8 @@ class Combat:
                         self.laser_full_since = None
             else:
                 self.laser_full_since = None
-                if (w.get("cooldown", 0) <= 0 and t >= self.short_until and s.los and
-                        s.p_laser >= SHOOT["laser_min_prob"] * 0.85 and mode in ("fight", "finish", "third", "crate", "npc")):
+                if (w.get("cooldown", 0) <= 0 and t >= self.short_until and s.los and s.in_laser_range
+                        and mode in ("fight", "finish", "third", "crate", "npc")):
                     fire[i] = True  # start charging
 
         if "lightning" in kinds:
@@ -331,6 +340,6 @@ class Combat:
             ammo = w.get("ammo", 1)
             if w.get("reload", 0) > 0 or ammo <= 0:
                 reload = ammo <= 0 and w.get("reload", 0) <= 0
-            elif s.p_gun >= thr:
-                fire[i] = True
+            elif s.gun_lined:
+                fire[i] = True  # every lined-up shot, no hit-chance threshold
         return aim, fire, reload
