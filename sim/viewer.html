@@ -101,6 +101,7 @@ main{flex:1;display:flex;min-height:0}
   <input type="range" id="scrub" min="0" max="0" value="0" step="1" disabled>
   <span id="timeLbl">- / -</span>
   <label class="check"><input type="checkbox" id="follow"> Follow our bot</label>
+  <label class="check"><input type="checkbox" id="mindToggle" checked> Bot minimap</label>
   <button id="btnFit" title="Reset pan and zoom">Fit</button>
 </footer>
 <script>
@@ -325,6 +326,51 @@ function render(){
     ctx.fillStyle="hsla(215,12%,"+(16+t*34).toFixed(1)+"%,0.95)";
     ctx.fill();
     ctx.strokeStyle="rgba(0,0,0,0.6)"; ctx.lineWidth=1; ctx.stroke();
+  }
+
+  // bot minimap overlay: what OUR bot believes (from MECH_DUMP snapshots)
+  var mt=document.getElementById('mindToggle');
+  if(S.mind && S.mind.length && (!mt || mt.checked)){
+    var curT=num(f.t,0), lo=0, hi=S.mind.length-1, mi=-1;
+    while(lo<=hi){ var md=(lo+hi)>>1; if(S.mind[md].t<=curT){ mi=md; lo=md+1; } else hi=md-1; }
+    if(mi>=0){
+      var M=S.mind[mi], mm=S.mindMeta, N=mm.N, cs=N*s;
+      function cellXY(K){ return [mm.x0+(K%mm.nnx)*N, mm.y0+Math.floor(K/mm.nnx)*N]; }
+      var dg=M.danger||[];
+      for(var q=0;q<dg.length;q++){
+        var c=cellXY(dg[q][0]), v=dg[q][1];
+        ctx.fillStyle="rgba(255,40,40,"+Math.min(0.55,0.08+v/12)+")";
+        ctx.fillRect(X(c[0]),Y(c[1]+N),cs+0.5,cs+0.5);
+      }
+      var ht=M.heat||[];
+      ctx.strokeStyle="rgba(255,170,0,0.8)"; ctx.lineWidth=1;
+      for(var q=0;q<ht.length;q++){ if(ht[q][1]<0.3) continue; var c=cellXY(ht[q][0]); ctx.strokeRect(X(c[0]),Y(c[1]+N),cs,cs); }
+      var it=M.items||[];
+      for(var q=0;q<it.length;q++){
+        ctx.beginPath(); ctx.arc(X(it[q][1]),Y(it[q][2]),Math.max(3,2.5*s),0,TAU);
+        ctx.strokeStyle=it[q][0]==="cube"?"#6cf2ff":"#7fb0ff"; ctx.lineWidth=1.5; ctx.stroke();
+      }
+      var tk=M.tracks||[];
+      for(var q=0;q<tk.length;q++){
+        var a2=Math.max(0.25,1-tk[q][2]/15);
+        ctx.globalAlpha=a2; ctx.beginPath(); ctx.arc(X(tk[q][0]),Y(tk[q][1]),Math.max(6,5*s),0,TAU);
+        ctx.strokeStyle="#ff4d4d"; ctx.setLineDash([4,3]); ctx.lineWidth=2; ctx.stroke(); ctx.setLineDash([]);
+        ctx.fillStyle="#ff9a9a"; ctx.font="11px sans-serif";
+        ctx.fillText("#"+tk[q][3]+(tk[q][2]>0.2?(" "+tk[q][2].toFixed(0)+"s"):""), X(tk[q][0])+8, Y(tk[q][1])-8);
+        ctx.globalAlpha=1;
+      }
+      if(om && M.path && M.path.length){
+        ctx.beginPath(); ctx.moveTo(X(om.x),Y(om.y));
+        for(var q=0;q<M.path.length;q++) ctx.lineTo(X(M.path[q][0]),Y(M.path[q][1]));
+        ctx.strokeStyle="rgba(255,255,255,0.8)"; ctx.setLineDash([6,4]); ctx.lineWidth=1.5; ctx.stroke(); ctx.setLineDash([]);
+      }
+      if(M.plan){
+        var px2=X(M.plan[1]), py2=Y(M.plan[2]);
+        ctx.strokeStyle="#00ff9c"; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(px2,py2,9,0,TAU); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(px2-12,py2); ctx.lineTo(px2+12,py2); ctx.moveTo(px2,py2-12); ctx.lineTo(px2,py2+12); ctx.stroke();
+        ctx.fillStyle="#00ff9c"; ctx.font="bold 12px sans-serif"; ctx.fillText(M.plan[0]+" ("+M.plan[3]+")", px2+12, py2+14);
+      }
+    }
   }
 
   // items
@@ -599,6 +645,13 @@ window.addEventListener("resize",function(){ resize(); });
 resize();
 $("speed").value="1";
 requestAnimationFrame(tick);
+// Auto-load our bot's minimap snapshots from ?mind=<path> (written when MECH_DUMP is set)
+(function(){var q=new URLSearchParams(location.search).get('mind');
+ if(q){fetch(q).then(function(r){return r.text();}).then(function(t){
+   var L=t.split('\n'), out=[];
+   for(var i=0;i<L.length;i++){ if(!L[i].trim()) continue; try{ var o=JSON.parse(L[i]); if(o.type==='mind_meta') S.mindMeta=o; else if(o.type==='mind') out.push(o);}catch(e){} }
+   S.mind=out; S.dirty=true; var mt=document.getElementById('mindToggle'); if(mt) mt.onchange=function(){S.dirty=true;};
+ }).catch(function(e){console.error(e);});}})();
 // Auto-load a replay from ?replay=<path> (works when served over http, e.g. python -m http.server)
 (function(){var q=new URLSearchParams(location.search).get('replay');
  if(q){fetch(q).then(function(r){return r.text();}).then(function(t){loadText(t,q);}).catch(function(e){console.error(e);});}})();

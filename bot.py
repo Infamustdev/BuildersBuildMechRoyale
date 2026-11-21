@@ -7,6 +7,7 @@ Loot     : SettingUp, AfterKill, Looting, None
 
 Every tunable number lives in tuning.py.
 """
+import json
 import math
 import os
 import random
@@ -104,6 +105,17 @@ class Bot:
         self.n_ticks = 0
         self.last_log = ""
         mf.log(f"[init] map built in {self.wm.build_s:.2f}s, roofs={len(self.wm.roof_spots)}")
+        # Local debugging only: MECH_DUMP=<file> makes the bot write its minimap twice a second.
+        # Never set in a real match.
+        self.dump = None
+        self.dump_t = -1e9
+        if os.environ.get("MECH_DUMP"):
+            try:
+                self.dump = open(os.environ["MECH_DUMP"], "w")
+                self.dump.write(json.dumps({"type": "mind_meta", "x0": self.wm.x0, "y0": self.wm.y0,
+                                            "N": self.wm.N, "nnx": self.wm.nnx, "nny": self.wm.nny}) + "\n")
+            except OSError:
+                self.dump = None
 
     # ================================================================ judgement
     def assess(self, obs):
@@ -735,6 +747,9 @@ class Bot:
         if key != self.last_log:
             mf.log(f"t={t:6.1f} hp={me['hp']:5.0f} {key} tgt={target['tr'].id if target else '-'} adv={sit.adv:.2f} alive={obs['alive']}")
             self.last_log = key
+        if self.dump is not None and t - self.dump_t >= 0.5:
+            self.dump_t = t
+            self.write_mind(obs, t)
         ms = (time.perf_counter() - t0) * 1000
         self.max_ms = max(self.max_ms, ms)
         self.slow = ms > 25
@@ -1022,6 +1037,34 @@ class Bot:
                 # don't waste a held charge: keep holding briefly, then let go
                 fire[i] = (t - self.last_target_t) < SHOOT["laser_max_hold_lost"]
         return aim, fire, reload
+
+    def write_mind(self, obs, t):
+        """One minimap snapshot: what the bot believes, on its own 4 m grid."""
+        cells = set()
+        for v in self.dm.views.values():
+            cells.update(v["cells"].keys())
+        cells.update(self.tr.heat.keys())
+        cells.update(self.dm.cool.keys())
+        danger = []
+        for K in cells:
+            c = self.dm.cost(K)
+            if c > 0.05:
+                danger.append([K, round(c, 1)])
+        heat = [[K, round(self.tr.heat_at_cell(K), 2)] for K in self.tr.heat if self.tr.heat_at_cell(K) > 0.05]
+        tracks = [[round(e.pos[0], 1), round(e.pos[1], 1), round(t - e.seen_t, 1), e.id]
+                  for e in self.tr.tracks.values() if e.kind == "mech" and t - e.seen_t < 15]
+        items = [["cube", round(c["pos"][0], 1), round(c["pos"][1], 1)] for c in self.tr.cubes.values()] +                 [[p["kind"], round(p["pos"][0], 1), round(p["pos"][1], 1)] for p in self.tr.pickups.values()] +                 [["crate", round(c["pos"][0], 1), round(c["pos"][1], 1)] for c in self.tr.crates.values()]
+        plan = None
+        if self.plan is not None:
+            plan = [self.plan.kind, round(self.plan.x, 1), round(self.plan.y, 1), round(self.plan.score, 1)]
+        path = [[round(x, 1), round(y, 1)] for x, y in self.path[:12]]
+        try:
+            self.dump.write(json.dumps({"type": "mind", "t": round(t, 2), "danger": danger, "heat": heat,
+                                        "tracks": tracks, "items": items, "plan": plan, "path": path,
+                                        "state": self.move_state}, separators=(",", ":")) + "\n")
+            self.dump.flush()
+        except (OSError, ValueError):
+            self.dump = None
 
     def on_end(self, msg):
         tot = sum(self.state_time.values()) or 1
