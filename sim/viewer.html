@@ -594,6 +594,9 @@ window.addEventListener("resize",function(){ resize(); });
 resize();
 $("speed").value="1";
 requestAnimationFrame(tick);
+// Auto-load a replay from ?replay=<path> (works when served over http, e.g. python -m http.server)
+(function(){var q=new URLSearchParams(location.search).get('replay');
+ if(q){fetch(q).then(function(r){return r.text();}).then(function(t){loadText(t,q);}).catch(function(e){console.error(e);});}})();
 })();
 </script>
 </body>
