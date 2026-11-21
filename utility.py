@@ -79,7 +79,9 @@ def plan(bot, obs, sit, camp):
     if sit.threats or sit.unseen_dps > 0:
         cp = bot.retreat_point(obs, sit)
         if cp is not None:
-            r = UTIL["r_cover_hurt"] * (1.0 - hp) + (UTIL["r_cover_losing"] if losing else 0.0)
+            # cover only pays once we're actually hurt: 0 above cover_hp, full at 0 HP
+            hurt = max(0.0, (UTIL["cover_hp"] - hp) / UTIL["cover_hp"])
+            r = UTIL["r_cover_hurt"] * hurt + (UTIL["r_cover_losing"] if losing and hp < UTIL["cover_hp"] + 0.15 else 0.0)
             opts.append(Option("cover", ("cover",), cp[0], cp[1], 0.0, r))
     if sit.flank is not None and hp > UTIL["flank_min_hp"]:
         e = sit.flank["tr"]

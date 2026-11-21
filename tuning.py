@@ -144,8 +144,9 @@ UTIL = {
     "r_drop": 8.0,                  # 3 cubes + full heal...
     "r_drop_heal": 8.0,             # ...worth more when hurt
     "r_camp": 1.5,                  # the zone-edge spot: where we go when nothing else is worth it
-    "r_cover_hurt": 14.0,           # cover value scales with missing HP
-    "r_cover_losing": 6.0,          # extra cover value while losing a fight
+    "cover_hp": 0.5,                # cover is worth nothing above this HP fraction...
+    "r_cover_hurt": 16.0,           # ...and up to this at 0 HP
+    "r_cover_losing": 4.0,          # extra while losing a fight, only below cover_hp + 0.15
     "r_flank": 4.0,                 # times our fight advantage (max 2)
     "flank_dist": 55.0,
     "flank_min_hp": 0.5,
