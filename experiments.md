@@ -32,3 +32,15 @@ latest commit on `main`). Limit: 4 per hour, one queued at a time.
 | Damage-first upgrades only | 3.25 | No gain. Rejected |
 
 **Simulator recalibrated** (drones and zone can't kill house bots; house aim error ×1.6): exp-4 bot = **3.00 score, 3.00 kills** on seeds 1–16 (real: 2.88). The snowball results above came from the uncalibrated sim (house bots dying to drones inflated scores) and need re-running.
+
+### Calibrated sim, seeds 1–16 (16 matches each)
+| Variant | Score |
+|---|---|
+| Exp 4 baseline, run A | 3.00 |
+| Exp 4 baseline, run B (identical code) | 1.94 |
+| Snowball loot only | 2.50 |
+| Snowball loot + damage upgrades | 2.38 |
+| Damage upgrades only | 2.44 |
+
+**Noise:** the same bot on the same seeds scored 3.00 and 1.94, so 16-match results are ±1 noise:
+all snowball variants are inside it. Use 64+ matches per variant before deciding anything.
