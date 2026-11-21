@@ -310,6 +310,8 @@ class Bot:
             return 1.0, far and energy > MOVE["fight_boost_energy_min"]
         if sit.zone_need > creep * walk * MOVE["zone_walk_ratio"]:
             return 1.0, False
+        if self.loot_state == "AfterKill":
+            return 1.0, False  # enemies already know where the fight was: grab the cubes fast
         px, py = me["pos"][0], me["pos"][1]
         near = self.tr.threat_near(px, py, MOVE["stealth_radius"])
         hot = self.tr.heat_near(px, py, MOVE["stealth_radius"] * 0.6) > 0.8
@@ -670,7 +672,18 @@ class Bot:
                 if p is not None:
                     self.retreat_pt = p
                 self.retreat_t = t
-            if self.retreat_pt is not None and math.hypot(self.retreat_pt[0] - px, self.retreat_pt[1] - py) > 2.5:
+            # cubes from a fight right next to us are worth a short detour if nobody is close
+            nearest_enemy = min((h["d"] for h in sit.threats), default=1e9)
+            grab = None
+            if nearest_enemy >= LOOT["retreat_grab_enemy_min"]:
+                for c in self.tr.cubes.values():
+                    d = math.hypot(c["pos"][0] - px, c["pos"][1] - py)
+                    if d <= LOOT["retreat_grab_r"] and abs(c["pos"][2] - pz) < 4 and (grab is None or d < grab[0]):
+                        grab = (d, c["pos"][0], c["pos"][1])
+            if grab is not None:
+                mx, my = self.follow(obs, grab[1], grab[2], replan_s=1.0)
+                self.loot_state = "AfterKill"
+            elif self.retreat_pt is not None and math.hypot(self.retreat_pt[0] - px, self.retreat_pt[1] - py) > 2.5:
                 mx, my = self.follow(obs, self.retreat_pt[0], self.retreat_pt[1], replan_s=1.5)
             # else: hold still in cover -> silent, and regen kicks in after regen_delay
         elif st == "Flanking" and sit.flank is not None:
@@ -713,7 +726,9 @@ class Bot:
                     self.stuck_t = 0.0
         self.last_pos = (px, py)
         act["move"] = [round(mx * scale, 3), round(my * scale, 3)]
-        act["boost"] = bool(boost and (mx or my))
+        # boost in the air fires the jets (that's how climbing works): only allow it on the
+        # ground, or during a deliberate roof climb, otherwise every jump becomes a 30 m flight
+        act["boost"] = bool(boost and (mx or my) and (me.get("grounded", True) or self.climb is not None))
         if jump:
             act["jump"] = True
 

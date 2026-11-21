@@ -94,6 +94,8 @@ SHOOT = {
 
 # ---------------------------------------------------------------- loot
 LOOT = {
+    "retreat_grab_r": 40.0,         # while retreating, still grab cubes this close...
+    "retreat_grab_enemy_min": 90.0, # ...if no enemy is closer than this
     "no_weapon_detour": 320.0,      # with an empty secondary slot, go this far out of the way for a weapon
     "free_radius": 60.0,            # no known enemy this close to an item = "free"
     "heat_max": 0.6,                # and enemy heat around it below this
