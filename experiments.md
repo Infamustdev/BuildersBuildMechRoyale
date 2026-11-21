@@ -22,3 +22,11 @@ latest commit on `main`). Limit: 4 per hour, one queued at a time.
 **Best so far:** #3, 2.83 (9fbd759). After the probe, set `PROBE["hide"] = False` to get it back.
 
 **Noise:** unknown (fill in from #1: |score #1 − score #0|)
+
+## Simulator results (same 16 seeds, `python -m sim.batch --matches 16 --seeds 1-16`)
+
+| Variant | Sim score | Notes |
+|---|---|---|
+| Exp 4 (current main) | 3.56 (8 seeds: 2.875 vs real 2.88) | Baseline |
+| Snowball: bigger loot detours, farm drones/crates until 70 s, damage-first upgrades | 2.75 | Fewer kills (1.31 vs 1.81); farming exposes us. Rejected |
+| Damage-first upgrades only | 3.25 | No gain. Rejected |
