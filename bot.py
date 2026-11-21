@@ -402,7 +402,7 @@ class Bot:
         mf.draw.label(f"HIDE hp{me['hp']:.0f} alive{obs['alive']}")
         ms = (time.perf_counter() - t0) * 1000
         self.max_ms = max(self.max_ms, ms)
-        self.slow = ms > 25
+        self.slow = ms > 25   # diagnostics only: nothing may branch on this, see tuning DANGER
         self.n_ticks += 1
         return act
 
@@ -493,13 +493,13 @@ class Bot:
             return 0.0, 0.0
         need = (self.path_goal is None or math.hypot(gx - self.path_goal[0], gy - self.path_goal[1]) > 8.0
                 or t - self.path_t > replan_s or not self.path)
-        if need and not self.slow:
+        if need:
             # straight line only if it's walkable AND not through enemy sight lines
             if self.wm.walk_clear(px, py, gx, gy) and (
                     not self.dm.any() or self.dm.line_cost(px, py, gx, gy) < DANGER["line_cost_max"]):
                 self.path = [(gx, gy)]
             else:
-                self.path = self.wm.path(px, py, gx, gy, budget_ms=DANGER["path_budget_ms"],
+                self.path = self.wm.path(px, py, gx, gy, budget_nodes=DANGER["path_budget_nodes"],
                                          avoid=self.dm.cost if self.dm.any() else None)
             self.path_goal = (gx, gy)
             self.path_t = t
@@ -763,7 +763,7 @@ class Bot:
         # back off the refresh after a slow tick: knowledge a fraction of a second staler is
         # cheap, a missed 50 ms answer is a tick with no shot
         self.rc.update(t, me["pos"], me["aim"][0], self.vis_range, self.vis_fov,
-                       budget=6 if self.slow else 16)
+                       budget=DANGER["recon_cells_per_tick"])
         self.dm.mark_exposure(t, me["pos"], sit.n_exposed + (1 if sit.unseen_dps > 0 else 0))
         self.dm.update(t, want)
         camp = self.pick_camp(obs)
@@ -997,7 +997,7 @@ class Bot:
         cv = self.cover
         replan = (cv is None or cv["tid"] != e.id
                   or math.hypot(e.pos[0] - cv["tpos"][0], e.pos[1] - cv["tpos"][1]) > COVER["target_move_replan"]
-                  or (t - cv["t"] > COVER["replan_s"] and not self.slow))
+                  or t - cv["t"] > COVER["replan_s"])
         if replan:
             new = self.plan_cover(obs, sit, h)
             if new is None:

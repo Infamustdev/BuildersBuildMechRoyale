@@ -334,3 +334,58 @@ energy to learn nothing. `alt` 32.0 / `energy_floor` 40.0.
 **Result — 16 matches, seeds 1-16, three runs of the kept build: 2.438, 2.062, 2.125.**
 exp 4 fresh baseline: 1.938. 60 m variant: 2.125, 1.250. Previous (32 m, no glide): 2.250, 2.125.
 The glide is free and the spread tightened; the height was not.
+
+## Exp 17 — teammate's Go bot ("kyoto-max") benchmarked against the same squad
+
+Teammate supplied two stripped Go 1.26.1 ELF binaries (`pilot-amd64`, `pilot-arm64`, same 102
+`main.*` symbols). Run via WSL Ubuntu; the simulator drives it over the same stdio protocol.
+
+**16 matches, seeds 1-16, same simulator, run inside WSL for a fair comparison:**
+
+| bot | run 1 | run 2 |
+|---|---|---|
+| **kyoto-max (hers)** | **2.688** | **2.688** |
+| ours (0222ac7 / 610782f) | 2.375 | 1.750 |
+| exp 4 (610fdb8), Windows | 1.938 | - |
+
+Hers is **deterministic** — byte-identical results across runs (mean_place 13.31, kills 2.69
+both times). Ours swings 1.75-2.44 on the same seeds. That is an advantage in itself: she can
+measure a change with one 16-match run and believe the number, where we need several and still
+cannot separate a 0.3 effect from noise. Our nondeterminism comes from `self.rng` and from
+being latency-sensitive (decisions at 27-31 ms; a late answer loses a tick's fire).
+
+Also note ours takes ~110-124 s of wall per batch against her ~70 s: her bot is roughly twice
+as cheap per decision (lat_p50 5.6 ms vs our ~9 ms).
+
+**Conclusion: her bot is ahead on this benchmark**, by about 0.3-0.9 depending on which of our
+runs you take, and it is the more trustworthy measurement. Capabilities in her symbol map that
+we do not have: `dodgeShell`, `lightningThreat`, `unseenCharge`, `ghostCover`.
+
+## Exp 18 — determinism: budgets in work, not wall-clock
+
+Four places let the machine's load change a decision: `self.slow = ms > 25` gating path replans
+(`bot.py:496`) and the recon refresh budget (6 vs 16 cells), the cover replan (`and not self.slow`),
+and `wm.path(budget_ms=14)` truncating A* by elapsed milliseconds. Same seed, three runs:
+place 13 / 13 / 14 with `late=0` every time and durations 190.7 / 144.8 / 140.6 s.
+
+Replaced with work budgets: `path_budget_nodes` 1800 (A* already counted iterations),
+`recon_cells_per_tick` 12, and the two `self.slow` gates removed. `self.slow` is kept for the
+log only; nothing may branch on it.
+
+**Same seed, three runs after: place 11 / kills 5 / duration 422.4 s, identical to the decisecond.**
+
+**16 matches, seeds 1-16, twice: 2.938 and 2.938** (mean place 13.06, kills 2.94, byte-identical).
+
+Two things worth noting. The score went *up*, from 1.75-2.38 to 2.938, because the old gates
+were not just unmeasurable but actively harmful: under four parallel workers the bot was often
+"slow" and skipped path replans and recon refreshes, so we were benchmarking a degraded bot --
+and the 1-CPU match container would have degraded it the same way. And it got faster:
+lat_p50 9 -> 2.7 ms, lat_max 27-31 -> 17.0 ms, because a 1800-node cap is tighter than the old
+14 ms allowance. check.py PASS, max 11.9 ms.
+
+| bot | score |
+|---|---|
+| **ours, deterministic** | **2.938, 2.938** |
+| kyoto-max (teammate's) | 2.688, 2.688 |
+| ours, before this fix | 2.375, 1.750 |
+| exp 4 (610fdb8) | 1.938 |

@@ -221,7 +221,10 @@ DANGER = {
     "forget_s": 10.0,               # drop an enemy's viewshed this long after last sighting
     "recast_move": 10.0,            # recompute a viewshed after the enemy moves this far
     "recast_s": 3.0,
-    "path_budget_ms": 14.0,
+    # Budgets are in work, not wall-clock: a time budget makes the same match play out
+    # differently depending on how busy the machine was, which destroys reproducibility.
+    "path_budget_nodes": 1800,      # A* nodes expanded before we accept a partial path
+    "recon_cells_per_tick": 12,     # knowledge-grid cells refreshed per decision
     "max_recasts_per_tick": 1,      # ~6 ms each; keeps a big group inside the time budget
     "line_samples": 20,           # cap probes per route; long options were costing a tick
     "line_cost_max": 2.0,           # straight walk allowed if its total danger is below this

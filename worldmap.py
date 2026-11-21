@@ -303,9 +303,15 @@ class WorldMap:
                 return best
         return -1
 
-    def path(self, sx, sy, gx, gy, budget_ms=8.0, avoid=None):
+    def path(self, sx, sy, gx, gy, budget_nodes=1800, avoid=None):
         """Weighted A* on the nav grid. Returns world waypoints (smoothed), possibly partial.
-        `avoid(K) -> extra cost` lets callers steer around exposed cells."""
+        `avoid(K) -> extra cost` lets callers steer around exposed cells.
+
+        Budgeted in nodes expanded, not milliseconds. A wall-clock budget makes the same match
+        play differently depending on what else the machine was doing, which costs us the
+        ability to measure anything: nodes track time closely enough on fixed hardware and
+        give the same answer every time.
+        """
         S = self.nearest_open(sx, sy)
         G = self.nearest_open(gx, gy)
         if S < 0 or G < 0:
@@ -315,7 +321,6 @@ class WorldMap:
         nnx, nb, ng = self.nnx, self.nblock, self.nground
         gxI, gyJ = G % nnx, G // nnx
         W = 1.6
-        deadline = time.perf_counter() + budget_ms / 1000.0
 
         def h(K):
             dx = abs(K % nnx - gxI)
@@ -338,7 +343,7 @@ class WorldMap:
             if g > gcost.get(K, 1e18):
                 continue
             it += 1
-            if (it & 63) == 0 and time.perf_counter() > deadline:
+            if it >= budget_nodes:
                 break
             I, J = K % nnx, K // nnx
             for dI, dJ, c in nbrs:
