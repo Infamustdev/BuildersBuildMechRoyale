@@ -3,3 +3,12 @@ __pycache__/
 mechfight-kit.tar.gz
 sim/out/
 HANDOFF.md
+# dev-only: kept on disk, out of the submission image (Dockerfile does COPY . .)
+sim/
+research/
+tools/
+.claude/
+experiments.md
+README.md
+protocol.md
+mechfight.schema.json
