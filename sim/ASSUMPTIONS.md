@@ -22,3 +22,8 @@
 - **Timing**: external bot answers arriving after `tick_budget_ms` (wall clock, from obs send) count as missed (coast, then idle after `coast_s`). `--budget-ms` lets heavy parallel batches relax this. Bot stderr goes straight to a log file (no pipe, so it cannot block).
 - **Early stop**: matches stop when all external bots are dead (practice score only needs their place); use `--full` to play to the end.
 - **House bots**: only living members are passed to `Squad.act_all`; actions consisting of only `tick` are counted as `squad_errors` in the result.
+
+## Calibration overrides (orchestrator)
+- NPC drones deal no damage to the house squad (team 100): the real hide probe scored 0.04, so house bots never die without our kills.
+- Zone damage cannot kill a squad member (HP floors at 1): sim house bots leave the late zone; real ones evidently do not die to it.
+- `HB_AIM_SCALE` (housebots.py) multiplies all house-bot aim error; tuned so the exp-4 bot matches its real 2.88.

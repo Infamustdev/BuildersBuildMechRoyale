@@ -1299,6 +1299,10 @@ class Match:
             return 0.0
         if att is not None and att is not v and att.team == v.team:
             return 0.0
+        if weapon == "npc" and v.team == 100:
+            # calibration: the real hide probe (0.04) shows house bots never die without us,
+            # so drones don't hurt the squad (team 100 = house squad in run_match)
+            return 0.0
         t = self.time
         bearing = math.atan2(sy - v.y, sx - v.x)
         rear = abs(wrap(bearing - v.yaw)) > self.front_half
@@ -1330,6 +1334,7 @@ class Match:
         if v.hp <= 0:
             v.dying = True
             v.killer = att.id if (att is not None and att is not v) else None
+            v.death_cause = weapon + ("/self" if att is v else "")
             self.dying.append(v)
         return dmg
 
@@ -1623,6 +1628,10 @@ class Match:
                 else:
                     m.events.append({"type": "damaged", "amount": round(amt, 1), "weapon": "zone",
                                      "bearing": None, "by": None})
+                if m.team == 100 and m.hp < 1.0:
+                    # calibration: sim house bots path badly out of the late zone; real ones
+                    # don't die without us, so the zone can't finish off the squad
+                    m.hp = 1.0
                 if m.hp <= 0 and not m.dying:
                     m.dying = True
                     m.killer = None
@@ -1659,7 +1668,7 @@ class Match:
                 kl.events.append({"type": "kill", "target": v.id})
                 self._log(f"slot {kl.id} killed slot {v.id}")
             else:
-                self._log(f"slot {v.id} died (zone) place {v.place}")
+                self._log(f"slot {v.id} died ({getattr(v, 'death_cause', 'zone')}) place {v.place}")
             self._sound("death", v.x, v.y, v.z)
             for w in v.weapons:
                 if w is not None and w["kind"] != "gun":

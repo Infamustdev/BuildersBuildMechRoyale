@@ -12,6 +12,7 @@ Interface: see sim/SPEC.md section 2.
 Standard library only. Only worldmap.WorldMap (passed in) is used for map queries.
 """
 import math
+import os
 import random
 import time
 
@@ -48,6 +49,10 @@ DIFFICULTY = {
                    dodge=True, counter=True, speed=1.0, boost=True, blind=True),
 }
 RANK = {"easy": 0, "medium": 1, "hard": 2, "expert": 3}
+
+# Calibration knob: multiplies every level's aim error. Tuned so our exp-4 bot's sim score
+# matches its real practice score (2.88). Override with the HB_AIM_SCALE env var.
+AIM_SCALE = float(os.environ.get("HB_AIM_SCALE", "1.6"))
 
 # Hunt schedule. hunters = initial + per_loss * (squad members lost) + per_step * int(t / time_step_s);
 # everybody hunts once `all_after_phase` zone phases have completed (default 3 -> after ~265 s).
@@ -500,7 +505,7 @@ class Squad:
             elif et == "effect" and ev.get("effect") == "short":
                 b.short_until = t + 2.0
         # aim noise: slowly varying, std = aim_err_deg
-        sig = math.radians(K["aim_err_deg"])
+        sig = math.radians(K["aim_err_deg"] * AIM_SCALE)
         b.ny = 0.8 * b.ny + 0.6 * sig * rng.gauss(0, 1)
         b.np = 0.8 * b.np + 0.6 * sig * rng.gauss(0, 1)
 

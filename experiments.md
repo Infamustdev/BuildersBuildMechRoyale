@@ -30,3 +30,5 @@ latest commit on `main`). Limit: 4 per hour, one queued at a time.
 | Exp 4 (current main) | 3.56 (8 seeds: 2.875 vs real 2.88) | Baseline |
 | Snowball: bigger loot detours, farm drones/crates until 70 s, damage-first upgrades | 2.75 | Fewer kills (1.31 vs 1.81); farming exposes us. Rejected |
 | Damage-first upgrades only | 3.25 | No gain. Rejected |
+
+**Simulator recalibrated** (drones and zone can't kill house bots; house aim error ×1.6): exp-4 bot = **3.00 score, 3.00 kills** on seeds 1–16 (real: 2.88). The snowball results above came from the uncalibrated sim (house bots dying to drones inflated scores) and need re-running.
