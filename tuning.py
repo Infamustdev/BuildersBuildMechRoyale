@@ -127,3 +127,11 @@ HEAT = {
 }
 
 TWO_PI = 2 * math.pi
+
+# Diagnostic probes. Set "hide" back to False for the real bot.
+# hide: creep silently to a covered ground spot near the next zone edge, never shoot, never loot,
+#       move only to stay inside the zone. Its practice score shows whether house bots die
+#       without us (e.g. to the zone): ~0 means practice points come only from our kills.
+PROBE = {
+    "hide": True,
+}

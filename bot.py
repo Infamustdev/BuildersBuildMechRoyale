@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mechfight as mf  # noqa: E402
 from combat import Combat  # noqa: E402
 from tracker import Tracker, angdiff  # noqa: E402
-from tuning import JUDGE, LOOT, MOVE, SHOOT, UPGRADE_PRIORITY  # noqa: E402
+from tuning import JUDGE, LOOT, MOVE, PROBE, SHOOT, UPGRADE_PRIORITY  # noqa: E402
 from worldmap import WorldMap  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -308,7 +308,44 @@ class Bot:
             return creep, False
         return 1.0, False
 
-    def pick_camp(self, obs, force=False):
+    def act_hide(self, obs):
+        """Probe: hide. Silent creep to a covered ground spot by the next zone edge; never shoot or loot."""
+        t0 = time.perf_counter()
+        me = obs["self"]
+        px, py = me["pos"][0], me["pos"][1]
+        walk = me.get("stats", {}).get("walk_speed", 11.7)
+        self.tr.update(obs)
+        sit = self.assess(obs)
+        camp = self.pick_camp(obs, allow_roof=False)
+        act = {"tick": obs["tick"]}
+        mx, my = self.follow(obs, camp[0], camp[1])
+        if math.hypot(camp[0] - px, camp[1] - py) < MOVE["arrive_radius"]:
+            mx = my = 0.0
+        mx, my = self.avoid_walls(px, py, mx, my)
+        creep = max(0.15, (self.step_speed - MOVE["creep_margin"]) / walk)
+        scale, boost = creep, False
+        if sit.outside or sit.zone_need > walk * MOVE["zone_boost_ratio"]:
+            scale, boost = 1.0, me.get("energy", 0) > 5
+        elif sit.zone_need > creep * walk * MOVE["zone_walk_ratio"]:
+            scale = 1.0
+        self.move_state = "Hiding"
+        act["move"] = [round(mx * scale, 3), round(my * scale, 3)]
+        act["boost"] = bool(boost and (mx or my))
+        act["aim"] = [round(me["aim"][0] + 1.2, 4), 0.0]
+        act["fire"] = [False, False]
+        offer = obs.get("offer")
+        if offer and offer.get("choices"):
+            act["pick"] = max(range(len(offer["choices"])),
+                              key=lambda i: UPGRADE_PRIORITY.get(offer["choices"][i].get("id"), 1.0))
+        self.state_time["Hiding"] = self.state_time.get("Hiding", 0) + 1
+        mf.draw.label(f"HIDE hp{me['hp']:.0f} alive{obs['alive']}")
+        ms = (time.perf_counter() - t0) * 1000
+        self.max_ms = max(self.max_ms, ms)
+        self.slow = ms > 25
+        self.n_ticks += 1
+        return act
+
+    def pick_camp(self, obs, force=False, allow_roof=True):
         """Camp spot near the edge of the next zone circle, scored by travel, cover, height, heat."""
         t = obs["t"]
         z = obs["zone"]
@@ -336,7 +373,7 @@ class Bot:
                     continue
                 x, y = self.wm.ncenter(K)
                 cands.append((x, y, None))
-        energy_ok = me.get("max_energy", 100) >= MOVE["roof_energy_min"]
+        energy_ok = allow_roof and me.get("max_energy", 100) >= MOVE["roof_energy_min"]
         for (x, y, top, h) in self.wm.roof_spots:
             dc = math.hypot(x - cx, y - cy)
             if not (R * 0.55 <= dc <= R - margin * 0.6):
@@ -558,6 +595,8 @@ class Bot:
 
     # ================================================================ main
     def act(self, obs):
+        if PROBE.get("hide"):
+            return self.act_hide(obs)
         t0 = time.perf_counter()
         t = obs["t"]
         me = obs["self"]
