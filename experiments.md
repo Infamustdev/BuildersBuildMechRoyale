@@ -44,3 +44,11 @@ latest commit on `main`). Limit: 4 per hour, one queued at a time.
 
 **Noise:** the same bot on the same seeds scored 3.00 and 1.94, so 16-match results are ±1 noise:
 all snowball variants are inside it. Use 64+ matches per variant before deciding anything.
+
+### Danger map + utility planner vs exp 4 (calibrated sim, seeds 1–16, 16 matches each)
+| Bot | Run A | Run B | Earlier runs | Mean |
+|---|---|---|---|---|
+| Current (danger map, utility planner, fc74e24) | 1.81 | 1.75 | — | **1.78** |
+| Exp 4 (610fdb8, real 2.88) | 1.94 | 2.38 | 3.00, 1.94 | **2.32** |
+
+The planner is not better than exp 4 in the sim, probably slightly worse. Exp 4 stays the version to submit.
