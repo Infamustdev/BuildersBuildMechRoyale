@@ -51,8 +51,9 @@ MOVE = {
 # ---------------------------------------------------------------- judgement
 JUDGE = {
     # Fight advantage A = (time they need to kill us) / (time we need to kill them).
-    "fight_min_adv": 0.9,           # engage an approaching/attacking enemy at or above this
-    "flee_adv": 0.6,                # below this, retreat
+    # An engaged enemy is fought unless one of the retreat rules below fires.
+    "flee_adv": 0.4,                # below this, retreat (exp 2: was 0.6)
+    "low_hp_flee_adv": 0.9,         # at low HP, retreat below this advantage (exp 2: was 1.3)
     "flee_hysteresis": 0.4,         # leave a retreat to fight only above flee_adv + this
     "engage_memory_s": 3.0,         # an enemy stays "engaged" this long after the last sign
     "flank_min_adv": 1.2,           # only go hunting/flanking when clearly stronger

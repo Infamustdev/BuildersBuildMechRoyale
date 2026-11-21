@@ -214,7 +214,7 @@ class Bot:
         danger = bool(sit.engaged) or sit.unseen_dps > 0
         if danger:
             self.last_danger_t = t
-            if sit.finish is None and (sit.adv < JUDGE["flee_adv"] or (low and sit.adv < 1.3)
+            if sit.finish is None and (sit.adv < JUDGE["flee_adv"] or (low and sit.adv < JUDGE["low_hp_flee_adv"])
                                        or (sit.multi_angle and len(sit.engaged) + (1 if sit.unseen_dps > 0 else 0) >= 2)):
                 retreat_now = True
         if prev == "Retreating" and not retreat_now:
