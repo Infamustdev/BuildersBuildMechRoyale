@@ -29,6 +29,8 @@ MOVE = {
     "roof_min_h": 5.0,              # roof must be this much above ground to count as high ground
     "roof_max_h": 38.0,             # and low enough to climb with the jets
     "roof_energy_min": 70.0,        # only start a climb with this much energy
+    "use_roofs": False,             # roof climbing got stuck at the map edge in the sim; off until fixed
+    "map_margin": 40.0,             # keep camp spots this far inside the map edge
     # Zone pressure: allow running/boosting when the zone would catch us.
     "zone_walk_ratio": 0.7,         # needed speed / creep speed above this -> walk at full speed
     "zone_boost_ratio": 0.8,        # needed speed / walk speed above this -> boost
@@ -92,6 +94,7 @@ SHOOT = {
 
 # ---------------------------------------------------------------- loot
 LOOT = {
+    "no_weapon_detour": 320.0,      # with an empty secondary slot, go this far out of the way for a weapon
     "free_radius": 60.0,            # no known enemy this close to an item = "free"
     "heat_max": 0.6,                # and enemy heat around it below this
     "max_detour": {"cube": 70.0, "weapon": 90.0, "crate": 45.0, "npc": 60.0, "drop": 120.0},
@@ -127,6 +130,24 @@ HEAT = {
 }
 
 TWO_PI = 2 * math.pi
+
+# Danger map (exp 6): path cost per 4 m cell. Base step cost is 1 per cell.
+DANGER = {
+    "view_range": 200.0,            # enemies see this far (vision range)
+    "rays": 120,                    # viewshed rays per enemy (3 degrees apart)
+    "cone_deg": 120.0,              # enemy view cone; cells inside it cost more
+    "seen_cost": 4.0,               # extra cost of a cell an enemy can see (close end)
+    "cone_mult": 1.8,
+    "heat_cost": 1.5,               # per unit of sound heat
+    "item_cool": 0.5,               # cheaper cells around items we want
+    "forget_s": 10.0,               # drop an enemy's viewshed this long after last sighting
+    "recast_move": 10.0,            # recompute a viewshed after the enemy moves this far
+    "recast_s": 3.0,
+    "path_budget_ms": 14.0,
+    "max_recasts_per_tick": 2,      # ~6 ms each; keeps a big group inside the time budget
+    "line_cost_max": 2.0,           # straight walk allowed if its total danger is below this
+    "loot_max": 3.0,                # an item is "free" if its cell's danger is below this
+}
 
 # Diagnostic probes. Set "hide" back to False for the real bot.
 # hide: creep silently to a covered ground spot near the next zone edge, never shoot, never loot,

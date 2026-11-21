@@ -17,8 +17,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import mechfight as mf  # noqa: E402
 from combat import Combat  # noqa: E402
+from danger import DangerMap  # noqa: E402
 from tracker import Tracker, angdiff  # noqa: E402
-from tuning import COVER, JUDGE, LOOT, MOVE, PROBE, SHOOT, UPGRADE_PRIORITY  # noqa: E402
+from tuning import COVER, DANGER, JUDGE, LOOT, MOVE, PROBE, SHOOT, UPGRADE_PRIORITY  # noqa: E402
 from worldmap import WorldMap  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -65,6 +66,7 @@ class Bot:
         self.wm = WorldMap(find_map_dir(hello), step_up=cfg.get("mech", {}).get("step_up", 1.2))
         self.tr = Tracker(self.wm, cfg)
         self.cb = Combat(cfg, self.wm)
+        self.dm = DangerMap(self.wm, self.tr)
         self.pickup_r = cfg.get("loot", {}).get("pickup_radius", 4.0)
         self.step_speed = cfg.get("sound", {}).get("step_speed", 5.0)
         self.front_arc = math.radians(cfg.get("mech", {}).get("front_arc_deg", 180.0)) / 2
@@ -380,7 +382,10 @@ class Bot:
                     continue
                 x, y = self.wm.ncenter(K)
                 cands.append((x, y, None))
-        energy_ok = allow_roof and me.get("max_energy", 100) >= MOVE["roof_energy_min"]
+        energy_ok = allow_roof and MOVE["use_roofs"] and me.get("max_energy", 100) >= MOVE["roof_energy_min"]
+        mm = MOVE["map_margin"]
+        wm = self.wm
+        cands = [c for c in cands if wm.x0 + mm <= c[0] <= wm.x1 - mm and wm.y0 + mm <= c[1] <= wm.y1 - mm]
         for (x, y, top, h) in self.wm.roof_spots:
             dc = math.hypot(x - cx, y - cy)
             if not (R * 0.55 <= dc <= R - margin * 0.6):
@@ -409,7 +414,12 @@ class Bot:
                 bs, best = s, (x, y, top, s)
         if best is None:
             best = (cx, cy, None, 0.0)
-        if self.camp and key == self.zone_key and not force:
+        old_failed = self.camp is not None and self.camp[2] is not None and \
+            self.roof_fail.get((round(self.camp[0]), round(self.camp[1])), -1e9) > t - 60
+        old_off_map = self.camp is not None and not (
+            wm.x0 + mm <= self.camp[0] <= wm.x1 - mm and wm.y0 + mm <= self.camp[1] <= wm.y1 - mm)
+        if self.camp and key == self.zone_key and not force and not old_failed and not old_off_map \
+                and (self.camp[2] is None or MOVE["use_roofs"]):
             # rescore the current spot; keep it unless the new one is clearly better
             ox, oy, otop, _ = self.camp
             os_ = -MOVE["w_travel"] * math.hypot(ox - px, oy - py) / 100.0 + \
@@ -432,10 +442,13 @@ class Bot:
         need = (self.path_goal is None or math.hypot(gx - self.path_goal[0], gy - self.path_goal[1]) > 8.0
                 or t - self.path_t > replan_s or not self.path)
         if need and not self.slow:
-            if self.wm.walk_clear(px, py, gx, gy):
+            # straight line only if it's walkable AND not through enemy sight lines
+            if self.wm.walk_clear(px, py, gx, gy) and (
+                    not self.dm.any() or self.dm.line_cost(px, py, gx, gy) < DANGER["line_cost_max"]):
                 self.path = [(gx, gy)]
             else:
-                self.path = self.wm.path(px, py, gx, gy, budget_ms=7.0)
+                self.path = self.wm.path(px, py, gx, gy, budget_ms=DANGER["path_budget_ms"],
+                                         avoid=self.dm.cost if self.dm.any() else None)
             self.path_goal = (gx, gy)
             self.path_t = t
         while len(self.path) > 1 and math.hypot(self.path[0][0] - px, self.path[0][1] - py) < 3.0:
@@ -511,7 +524,8 @@ class Bot:
         cand = []
 
         def free(x, y, r=LOOT["free_radius"]):
-            return tr.threat_near(x, y, r) > r and tr.heat_near(x, y, 15.0) < LOOT["heat_max"]
+            # free = no enemy right next to it and the spot isn't in enemy sight lines / hot sound area
+            return tr.threat_near(x, y, r) > r and self.dm.at(x, y) < DANGER["loot_max"]
 
         def detour(x, y):
             return math.hypot(x - px, y - py) + math.hypot(dx - x, dy - y) - base
@@ -524,8 +538,9 @@ class Bot:
             if z - self.wm.ground_at(x, y) > 4 and abs(z - pz) > 4:
                 continue  # on a roof we're not on
             det = detour(x, y)
-            if det <= LOOT["max_detour"]["weapon"] * mult and free(x, y):
-                cand.append((3.0 + rank.get(k, 0), det, ("weapon", pid, (x, y, z))))
+            lim = LOOT["no_weapon_detour"] if slot1 is None else LOOT["max_detour"]["weapon"] * mult
+            if det <= lim and free(x, y):
+                cand.append((3.0 + rank.get(k, 0) + (2.0 if slot1 is None else 0.0), det, ("weapon", pid, (x, y, z))))
         recent_kill = any(t - kt < 30 for kt, _ in tr.kill_spots)
         for cid, c in tr.cubes.items():
             x, y, z = c["pos"]
@@ -610,6 +625,9 @@ class Bot:
         px, py, pz = me["pos"]
         self.tr.update(obs)
         sit = self.assess(obs)
+        want = [(c["pos"][0], c["pos"][1]) for c in self.tr.cubes.values()] + \
+               [(p["pos"][0], p["pos"][1]) for p in self.tr.pickups.values()]
+        self.dm.update(t, want)
         camp = self.pick_camp(obs)
         dest = (camp[0], camp[1])
         if self.move_state in ("EarlySetup", "Rotating"):

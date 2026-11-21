@@ -404,18 +404,23 @@ function render(){
   var curT=num(f.t,0);
   for(var j=S.frameIdx;j>=0;j--){
     var fj=S.frames[j], age=curT-num(fj.t,0);
-    if(age>=SHOT_LIFE) break;
+    if(age>=SHOT_LIFE*2) break;
     var sh=fj.shots||[];
     for(var q=0;q<sh.length;q++){
       var sp=sh[q];
       if(!sp.from||!sp.to) continue;
-      ctx.globalAlpha=Math.max(0,1-age/SHOT_LIFE);
+      // our bot's shots: thicker, longer-lived, with a white core so they stand out
+      var ours=(S.ourSlot!==null && sp.by===S.ourSlot), life=ours?SHOT_LIFE*2:SHOT_LIFE;
+      if(age>=life) continue;
+      var a=Math.max(0,1-age/life), w=(sp.kind==="laser"?4:(sp.kind==="mortar"?3:2))*(ours?1.6:0.8);
+      ctx.globalAlpha=a;
       ctx.strokeStyle=SHOT_COL[sp.kind]||"#ffffff";
-      ctx.lineWidth=sp.kind==="mortar"?2.5:1.8;
-      ctx.beginPath();
-      ctx.moveTo(X(sp.from[0]),Y(sp.from[1]));
-      ctx.lineTo(X(sp.to[0]),Y(sp.to[1]));
-      ctx.stroke();
+      ctx.lineWidth=w;
+      ctx.beginPath(); ctx.moveTo(X(sp.from[0]),Y(sp.from[1])); ctx.lineTo(X(sp.to[0]),Y(sp.to[1])); ctx.stroke();
+      if(ours){
+        ctx.strokeStyle="#ffffff"; ctx.lineWidth=Math.max(1,w/3);
+        ctx.beginPath(); ctx.moveTo(X(sp.from[0]),Y(sp.from[1])); ctx.lineTo(X(sp.to[0]),Y(sp.to[1])); ctx.stroke();
+      }
     }
   }
   ctx.globalAlpha=1;
