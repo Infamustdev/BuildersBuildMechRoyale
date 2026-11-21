@@ -18,8 +18,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mechfight as mf  # noqa: E402
 from combat import Combat  # noqa: E402
 from danger import DangerMap  # noqa: E402
+import utility  # noqa: E402
 from tracker import Tracker, angdiff  # noqa: E402
-from tuning import COVER, DANGER, JUDGE, LOOT, MOVE, PROBE, SHOOT, UPGRADE_PRIORITY  # noqa: E402
+from tuning import COVER, DANGER, JUDGE, LOOT, MOVE, PROBE, SHOOT, UPGRADE_PRIORITY, UTIL  # noqa: E402
 from worldmap import WorldMap  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -91,6 +92,9 @@ class Bot:
         self.retreat_t = -1e9
         self.last_danger_t = -1e9
         self.cover = None         # active peek-shoot-hide plan
+        self.plan = None          # current utility destination (utility.Option)
+        self.plan_t = -1e9
+        self.plan_key = None
         self.loot_target = None
         self.last_target_t = -1e9
         self.idle_t = 0.0
@@ -264,7 +268,10 @@ class Bot:
         if st != "Fighting":
             self.cover = None
         self.move_state = st
+        self.shoot_aim_states(sit)
 
+    def shoot_aim_states(self, sit):
+        st = self.move_state
         # shooting state
         if sit.finish is not None:
             self.shoot_state = "Finishing"
@@ -632,71 +639,45 @@ class Bot:
         self.dm.update(t, want)
         camp = self.pick_camp(obs)
         dest = (camp[0], camp[1])
-        if self.move_state in ("EarlySetup", "Rotating"):
-            self.choose_loot(obs, sit, dest)
-        else:
-            self.loot_target = None
-            self.loot_state = "None"
         self.choose_states(obs, sit)
         act = {"tick": obs["tick"]}
-        scale, boost = self.speed_mode(obs, sit)
         st = self.move_state
         mx = my = 0.0
         jump = False
         target = sit.target
+        walk = me.get("stats", {}).get("walk_speed", 11.7)
+        zone_forced = sit.outside or sit.zone_need > walk * MOVE["zone_boost_ratio"]
 
         # ---------------- movement
-        if st in ("EarlySetup", "Rotating"):
-            gx, gy = dest
-            hold = False
-            if self.loot_target is not None:
-                kind, iid, pos, dist = self.loot_target
-                gx, gy = pos[0], pos[1]
-                if kind in ("crate", "npc") and dist < LOOT["crate_engage_dist"]:
-                    hold = True
-                if kind == "drop" and dist < 4.0:
-                    hold = True
-            if not hold:
-                if camp[2] is not None and self.loot_target is None:
-                    mx, my, jump, boost2 = self.roof_move(obs, camp)
-                    boost = boost or boost2
-                else:
-                    mx, my = self.follow(obs, gx, gy)
-                    if self.loot_target is None and math.hypot(gx - px, gy - py) < MOVE["arrive_radius"]:
-                        mx = my = 0.0
-                        self.reached_camp = True
-        elif st == "Retreating":
-            # re-pick a hiding spot every 2 s while someone can still hurt us
-            if t - self.retreat_t > 2.0 and (t - self.last_danger_t) < 1.0:
-                p = self.retreat_point(obs, sit)
-                if p is not None:
-                    self.retreat_pt = p
-                self.retreat_t = t
-            # cubes from a fight right next to us are worth a short detour if nobody is close
-            nearest_enemy = min((h["d"] for h in sit.threats), default=1e9)
-            grab = None
-            if nearest_enemy >= LOOT["retreat_grab_enemy_min"]:
-                for c in self.tr.cubes.values():
-                    d = math.hypot(c["pos"][0] - px, c["pos"][1] - py)
-                    if d <= LOOT["retreat_grab_r"] and abs(c["pos"][2] - pz) < 4 and (grab is None or d < grab[0]):
-                        grab = (d, c["pos"][0], c["pos"][1])
-            if grab is not None:
-                mx, my = self.follow(obs, grab[1], grab[2], replan_s=1.0)
-                self.loot_state = "AfterKill"
-            elif self.retreat_pt is not None and math.hypot(self.retreat_pt[0] - px, self.retreat_pt[1] - py) > 2.5:
-                mx, my = self.follow(obs, self.retreat_pt[0], self.retreat_pt[1], replan_s=1.5)
-            # else: hold still in cover -> silent, and regen kicks in after regen_delay
-        elif st == "Flanking" and sit.flank is not None:
-            e = sit.flank["tr"]
-            back = e.aim[0] + math.pi
-            fx = e.pos[0] + math.cos(back) * MOVE["flank_dist"]
-            fy = e.pos[1] + math.sin(back) * MOVE["flank_dist"]
-            K = self.wm.nearest_open(fx, fy, 4)
-            if K >= 0:
-                fx, fy = self.wm.ncenter(K)
-            if not self.in_zone_after(obs, fx, fy):
-                fx, fy = dest
-            mx, my = self.follow(obs, fx, fy, replan_s=1.5)
+        if st not in ("Fighting", "Finishing") and not zone_forced:
+            # utility planner: one score decides loot / cover / flank / camp
+            if self.plan is None or t - self.plan_t >= UTIL["replan_s"]:
+                best, _ = utility.plan(self, obs, sit, camp)
+                self.plan, self.plan_t = best, t
+                self.plan_key = best.key if best else None
+            o = self.plan
+            self.loot_target = None
+            if o is not None:
+                dist = math.hypot(o.x - px, o.y - py)
+                if o.item is not None:
+                    self.loot_target = (o.kind, o.item[1], (o.x, o.y, o.z), dist)
+                self.move_state = {"cover": "Retreating", "flank": "Flanking"}.get(o.kind, "Rotating")
+                self.loot_state = o.kind
+                hold = ((o.kind in ("crate", "npc") and dist < LOOT["crate_engage_dist"])
+                        or (o.kind == "drop" and dist < 4.0)
+                        or (o.kind in ("camp", "cover") and dist < MOVE["arrive_radius"]))
+                if not hold:
+                    mx, my = self.follow(obs, o.x, o.y, replan_s=1.5)
+                if o.kind == "camp" and dist < MOVE["arrive_radius"]:
+                    self.reached_camp = True
+            st = self.move_state
+            self.shoot_aim_states(sit)
+        elif zone_forced and st not in ("Fighting", "Finishing"):
+            self.move_state = st = "Rotating"
+            self.loot_target = None
+            self.loot_state = "zone"
+            mx, my = self.follow(obs, *dest)
+            self.shoot_aim_states(sit)
         elif st in ("Fighting", "Finishing"):
             h = sit.finish if (st == "Finishing" and sit.finish is not None) else (sit.third if st == "Finishing" and sit.third else target)
             if h is not None:
@@ -708,6 +689,7 @@ class Bot:
                 else:
                     self.cover = None
                     mx, my, jump = self.fight_move(obs, h, chase=(st == "Finishing"))
+        scale, boost = self.speed_mode(obs, sit)
         if st not in ("Fighting", "Finishing"):
             mx, my = self.avoid_walls(px, py, mx, my)
         # stuck detection

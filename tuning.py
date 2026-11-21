@@ -133,6 +133,33 @@ HEAT = {
 
 TWO_PI = 2 * math.pi
 
+# Utility planner (exp 7): score = reward - danger - travel. Rewards are in "points"; one point
+# of danger is one point of the danger map (a cell an enemy can see close-up costs ~4-7).
+UTIL = {
+    "r_cube": 6.0,                  # per cube (clusters add up)
+    "r_weapon_empty": 12.0,         # any weapon while slot 2 is empty
+    "r_weapon_upgrade": 3.0,        # per rank of improvement (laser 3 > lightning 2 > mortar 1)
+    "r_crate": 2.5,                 # 1 cube + 50% weapon, but costs shots and makes noise
+    "r_npc": 3.0,                   # 2 cubes, shoots back a little
+    "r_drop": 8.0,                  # 3 cubes + full heal...
+    "r_drop_heal": 8.0,             # ...worth more when hurt
+    "r_camp": 1.5,                  # the zone-edge spot: where we go when nothing else is worth it
+    "r_cover_hurt": 14.0,           # cover value scales with missing HP
+    "r_cover_losing": 6.0,          # extra cover value while losing a fight
+    "r_flank": 4.0,                 # times our fight advantage (max 2)
+    "flank_dist": 55.0,
+    "flank_min_hp": 0.5,
+    "farm_min_hp": 0.5,             # crates/drones only when healthy
+    "w_danger": 1.0,
+    "hp_danger_gain": 3.0,          # danger weight x(1 + 3*(1-hp)): x4 at 0 HP
+    "losing_danger_mult": 1.5,
+    "path_danger_frac": 0.15,       # weight of danger summed along the straight route
+    "w_travel": 0.25,               # per second of walking
+    "w_zone": 3.0,                  # per 50 m outside the next circle
+    "stick_bonus": 1.0,             # hysteresis for the current destination
+    "replan_s": 0.5,                # re-score options this often
+}
+
 # Danger map (exp 6): path cost per 4 m cell. Base step cost is 1 per cell.
 DANGER = {
     "view_range": 200.0,            # enemies see this far (vision range)
