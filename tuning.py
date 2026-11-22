@@ -105,6 +105,12 @@ JUDGE = {
 
 # ---------------------------------------------------------------- shooting
 SHOOT = {
+    # Anti-aggro: the squad shares vision, so opening fire on a distant, healthy bot that is
+    # not already fighting us simply recruits it. Shoot attackers, the wounded, and anything
+    # close; leave idle bystanders alone.
+    "poke_max_m": 95.0,
+    "poke_max_laser_m": 150.0,
+    "poke_wounded_frac": 0.85,
 
     # Fire the gun on expected value rather than on crossing the target.
     "p_fire": 0.22,                 # normal threshold on modelled hit chance

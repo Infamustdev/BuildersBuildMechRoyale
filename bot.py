@@ -268,13 +268,16 @@ class Bot:
                 best = foc
         self.last_target_id = best["tr"].id if best is not None else None
         sit.target = best
-        # auto-lock: any enemy mech we can see and hit; prefer attackers, low HP, then closest.
-        # No "leave idle bystanders alone" filter: kills at 120-140 m on mechs not yet fighting us
-        # are real kills, and the squad hunts us regardless.
+        # auto-lock: any enemy mech we can see and hit; prefer attackers, low HP, then closest
         lk, lscore = None, -1e9
+        w1 = (me.get("weapons") or [None, None])[1]
+        poke = SHOOT["poke_max_laser_m"] if (w1 and w1.get("kind") == "laser") else SHOOT["poke_max_m"]
         for h in threats:
             if not h["los"] or h["d"] > SHOOT["lock_range"]:
                 continue
+            if (h["d"] > poke and not h["attacking"] and not h["engaged"]
+                    and h["hp_frac"] > SHOOT["poke_wounded_frac"]):
+                continue    # idle bystander far away: shooting it just adds a hunter
             sc = (3.0 if h["attacking"] else 0.0) + 2.0 * (1.0 - h["hp_frac"]) - h["d"] / 60.0
             if sc > lscore:
                 lscore, lk = sc, h
