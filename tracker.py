@@ -8,7 +8,7 @@
 """
 import math
 
-from tuning import HEAT, JUDGE
+from tuning import HEAT, JUDGE, LOOT
 
 
 def angdiff(a, b):
@@ -18,7 +18,8 @@ def angdiff(a, b):
 
 class Track:
     __slots__ = ("id", "kind", "pos", "vel", "aim", "hp", "max_hp", "cubes", "weapons", "charging",
-                 "seen_t", "first_t", "last_hit_us_t", "hp_hist", "visible", "engaged_until")
+                 "seen_t", "first_t", "last_hit_us_t", "hp_hist", "visible", "engaged_until",
+                 "_head", "_flips")
 
     def __init__(self, a, t):
         self.id = a["id"]
@@ -27,6 +28,8 @@ class Track:
         self.last_hit_us_t = -1e9
         self.engaged_until = -1e9
         self.hp_hist = []
+        self._head = None
+        self._flips = []   # times this mech reversed direction
         self.weapons = []
         self.update(a, t)
 
@@ -42,9 +45,23 @@ class Track:
         self.charging = bool(a.get("charging"))
         self.seen_t = t
         self.visible = True
+        # Reversal rate: how twitchy this mech is. A target that flips direction often should
+        # be led *less*, not more -- it probably will not still be going that way when the
+        # bullet arrives. This is the input to the telegraph factor in Combat.lead.
+        vx, vy = self.vel[0], self.vel[1]
+        if vx * vx + vy * vy > 1.0:
+            h = math.atan2(vy, vx)
+            if self._head is not None and abs(angdiff(h, self._head)) > 1.6:
+                self._flips.append(t)
+            self._head = h
+        self._flips = [q for q in self._flips if t - q < 4.0]
         self.hp_hist.append((t, self.hp))
         if len(self.hp_hist) > 30:
             del self.hp_hist[:10]
+
+    @property
+    def flip_rate(self):
+        return len(self._flips) / 4.0
 
     def losing_hp(self, t, window=2.0):
         """HP lost in the last `window` seconds (someone is fighting it)."""
@@ -68,6 +85,10 @@ class Tracker:
         self.drops = []
         self.attacks = []         # (t, by, bearing, weapon, amount)
         self.kills = 0
+        self._hsten = None
+        self.vis_crates = set()
+        self.vis_pickups = set()
+        self.vis_cubes = set()
         self.kill_spots = []      # (t, pos) of our kills (cubes there)
         self.self_pos = (0.0, 0.0, 0.0)
         self.t = 0.0
@@ -80,12 +101,34 @@ class Tracker:
         self.near_range = cfg.get("vision", {}).get("near_range", 45.0)
 
     # ------------------------------------------------------------ heat
+    def _heat_sten(self):
+        """Smooth deposit kernel: one sound should leave a blob that fades outward, not a dot.
+
+        A single cell per sample gave a scatter of unrelated specks, so the planner saw noise
+        where it should have seen "probably over there" shading off in every direction -- the
+        same shape a viewshed has.
+        """
+        if self._hsten is None:
+            N, R = self.wm.N, HEAT["blob_r"]
+            rc = int(R / N)
+            out = []
+            for dx in range(-rc, rc + 1):
+                for dy in range(-rc, rc + 1):
+                    ox, oy = dx * N, dy * N
+                    d = math.hypot(ox, oy)
+                    if d <= R:
+                        out.append((ox, oy, (1.0 - d / R) ** 2))
+            tot = sum(q[2] for q in out) or 1.0
+            self._hsten = [(ox, oy, g / tot * len(out) * HEAT["blob_gain"]) for ox, oy, g in out]
+        return self._hsten
+
     def add_heat(self, x, y, w):
-        K = self.wm.nidx(x, y)
-        if K < 0:
-            return
-        v = self.heat_at_cell(K) + w
-        self.heat[K] = (min(v, 5.0), self.t)
+        for ox, oy, g in self._heat_sten():
+            K = self.wm.nidx(x + ox, y + oy)
+            if K < 0:
+                continue
+            v = self.heat_at_cell(K) + w * g
+            self.heat[K] = (min(v, 5.0), self.t)
 
     def heat_at_cell(self, K):
         e = self.heat.get(K)
@@ -239,16 +282,26 @@ class Tracker:
         for c in obs.get("cubes", []):
             self.cubes[c["id"]] = {"pos": c["pos"], "t": t}
             vis_q.add(c["id"])
-        nr = self.near_range * 0.8
+        # Items do not move, so what we have seen is worth keeping: that is the whole return on
+        # the opening climb, and the reason the planner can route between loot it cannot
+        # currently see. We used to delete anything within 36 m that was missing from this one
+        # observation, so a tree crown or a strafe behind a wall wiped a crate off our map
+        # mid-engagement. Now we only forget on real evidence -- close, clear line of sight,
+        # and still not there, which means someone took it -- or after memory_s.
+        nr = LOOT["forget_near_m"]
+        eye = (sx, sy, me["pos"][2] + 8.0)
         for store, vis in ((self.pickups, vis_p), (self.crates, vis_c), (self.cubes, vis_q)):
             for iid in list(store):
                 if iid in vis:
                     continue
                 p = store[iid]["pos"]
-                if (p[0] - sx) ** 2 + (p[1] - sy) ** 2 < nr * nr and abs(p[2] - me["pos"][2]) < 6:
+                close = (p[0] - sx) ** 2 + (p[1] - sy) ** 2 < nr * nr and abs(p[2] - me["pos"][2]) < 6
+                if close and self.wm.los(eye, (p[0], p[1], p[2] + 1.0)):
                     del store[iid]
-                elif t - store[iid]["t"] > 120:
+                elif t - store[iid]["t"] > LOOT["memory_s"]:
                     del store[iid]
+        # what is in THIS observation, as opposed to what we remember being there
+        self.vis_crates, self.vis_pickups, self.vis_cubes = vis_c, vis_p, vis_q
         self.drops = obs.get("drops", []) or []
 
         if t - self._last_prune > 2.0:

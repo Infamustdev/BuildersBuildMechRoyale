@@ -13,7 +13,13 @@ MOVE = {
     "flank_circle_p": 0.65,         # chance a strafe flip picks the side that gets behind them
     "fight_cover_bias": 0.55,       # how hard the strafe bends toward cooler ground
     "fight_probe_m": 14.0,          # how far ahead that choice looks
-    "stealth_radius": 75.0,         # step sounds carry 40 m; keep a safety margin
+    # A step sound carries 40 m. At 75 we crawled whenever a remembered enemy was within
+    # nearly twice the distance anyone could hear us, which cost 61% of our speed for
+    # nothing. 45 is the carry range plus a margin for their movement and our error.
+    "stealth_radius": 45.0,
+    "roam_boost_energy_min": 45.0,  # boost while roaming only with energy to spare...
+    "roam_boost_max_danger": 0.5,   # ...and only across ground that is genuinely cool
+    "panic_hp": 0.30,               # below this and taking fire: break off, whatever the odds
     # Early round: head for the edge of the next zone circle.
     "early_phase_until": 45.0,      # s; EarlySetup ends at this time or on reaching the camp spot
     "edge_margin_frac": 0.14,       # camp this far inside the next circle (fraction of its radius)
@@ -55,6 +61,18 @@ MOVE = {
 
 # ---------------------------------------------------------------- judgement
 JUDGE = {
+    # Target selection: expected DPS x priority / torso-slew cost
+    "killable_s": 3.0,              # finishable in this long -> the kill is the whole point
+    "pri_killable": 4.0,
+    "pri_charging": 1.5,            # our hit cancels a laser charge
+    "pri_attacking": 1.5,
+    "pri_rear": 1.5,                # behind it: our damage is x1.5
+    "pri_nolos": 0.3,
+    "pri_backturn": 0.55,           # shooting it turns our back on something worse
+    "backturn_rad": 1.48,           # 85 degrees
+    "focus_margin": 2.2,            # a challenger must beat the locked target by this much
+    "slew_w": 1.5,
+
     # Fight advantage A = (time they need to kill us) / (time we need to kill them).
     # An engaged enemy is fought unless one of the retreat rules below fires.
     "flee_adv": 0.6,                # below this, retreat (exp 2 tried 0.4: 2.38 vs 2.58)
@@ -80,6 +98,20 @@ JUDGE = {
 
 # ---------------------------------------------------------------- shooting
 SHOOT = {
+    # Anti-aggro: the squad shares vision, so opening fire on a distant, healthy bot that is
+    # not already fighting us simply recruits it. Shoot attackers, the wounded, and anything
+    # close; leave idle bystanders alone.
+    "poke_max_m": 95.0,
+    "poke_max_laser_m": 150.0,
+    "poke_wounded_frac": 0.85,
+
+    # Fire the gun on expected value rather than on crossing the target.
+    "p_fire": 0.22,                 # normal threshold on modelled hit chance
+    "p_fire_near": 0.12,            # inside p_fire_near_m, or finishing: take the cheap shot
+    "p_fire_near_m": 60.0,
+    "p_fire_low": 0.30,             # ...but be choosy when a reload is close
+    "p_fire_low_ammo": 3,
+
     # No hit-chance threshold (exp 3): fire whenever the shot is lined up, i.e. in range, line of
     # sight, and the torso (after this tick's slew) points inside the target's silhouette.
     "lineup_frac": 1.0,             # fraction of the target's angular half-width that counts as lined up
@@ -105,7 +137,15 @@ LOOT = {
     "max_detour": {"cube": 70.0, "weapon": 90.0, "crate": 45.0, "npc": 60.0, "drop": 120.0},
     "after_kill_detour": 110.0,
     "early_detour_mult": 1.5,       # EarlySetup is more generous
+    "engage_timeout_s": 2.5,        # standing on a crate this long with no damage = give up
+    "give_up_s": 20.0,              # ...and do not offer it again for this long
+    "memory_s": 120.0,              # how long a seen item stays on our map unseen
+    "forget_near_m": 12.0,          # ...unless we are this close with a clear view and it is gone
     "weapon_rank": {"laser": 3, "lightning": 2, "mortar": 1, "gun": 0},
+    # How much of the "fill the empty slot" bonus each weapon deserves. The gun alone is
+    # 107 sustained DPS; a laser roughly doubles that and lightning more than triples it
+    # inside 45 m, while a mortar is 10-40 DPS against anything that moves.
+    "weapon_value": {"laser": 1.0, "lightning": 0.95, "mortar": 0.4, "gun": 0.0},
     "npc_min_hp_frac": 0.7,         # only farm drones when healthy
     "drop_min_s_left": 0.0,
     "drop_free_radius": 100.0,
@@ -130,6 +170,8 @@ HEAT = {
         "explosion": 0.25, "step": 1.6, "boost": 1.2, "jet": 1.0, "reload": 0.8,
         "death": 0.2, "crate": 0.6, "npc_gun": 0.1, "drop": 0.0,
     },
+    "blob_r": 12.0,                 # a sound deposits a fading blob of this radius...
+    "blob_gain": 0.35,              # ...with this much of the old single-cell weight at the centre
     "ghost_weight": 2.0,            # heat left where a tracked mech was last known
     "hot": 0.35,                    # a cell this hot counts as a likely enemy position
 }
@@ -149,6 +191,7 @@ UTIL = {
     # A crate is 300 HP for 1 cube plus a weapon half the time (mortar/laser/lightning equally).
     # In this file's own currency that is r_cube 6.0 + 0.5 * ~8 for the average weapon = ~10,
     # discounted for the time spent shooting it and the 220 m noise of it breaking.
+    "crate_quiet": 1.75,             # x this when no enemy is known (swept)
     "r_crate": 7.0,
     "r_npc": 5.0,                   # 2 cubes, shoots back a little
     "r_npc_biting": 14.0,           # ...and this much more if it is shooting us right now
@@ -174,7 +217,8 @@ UTIL = {
     "hp_danger_gain": 3.0,          # danger weight x(1 + 3*(1-hp)): x4 at 0 HP
     "losing_danger_mult": 1.5,
     "path_danger_frac": 0.15,       # weight of danger summed along the straight route
-    "w_travel": 0.25,               # per second of walking
+    "path_inflate": 1.2,            # a route is longer than the straight line
+    "eta_scale": 6.0,               # reward is halved at this many seconds of travel
     "w_zone": 3.0,                  # per 50 m outside the next circle
     "stick_bonus": 1.0,             # hysteresis for the current destination
     "commit_gain": 3.0,             # ...times this much more once we've closed the whole gap
@@ -189,10 +233,11 @@ UTIL = {
 # 90, the loudest tier, and we are a silhouette with no cover the whole time.
 SCAN = {
     "enabled": True,
-    "alt": 32.0,                    # measured: 60 m finds no more items than 30 m does...
-    "energy_floor": 40.0,           # ...so buy the glide cheaply and keep energy for the fight
+    "alt": 30.0,                    # 30 m: measured to see as much as 60 m does, for half...
+    "energy_floor": 35.0,           # ...the airtime and with energy left for the first fight
     "max_s": 12.0,                  # hard stop, whatever height we reached
-    "abort_hp": 0.97,               # someone is already shooting: get down and fight
+    "abort_hp": 0.97,               # only real damage aborts the climb; chip fire does not,
+                                    # or we never get the altitude the scan exists for
     "min_air_s": 0.5,               # ignore "grounded" for this long after the jump
     # The descent is free steering: we are already in the air, so pick where to come down.
     "glide_rays": 16,               # bearings considered for the landing spot
@@ -201,13 +246,27 @@ SCAN = {
     "glide_repick_s": 0.4,
 }
 
+# Stepping out from under a mortar. Shells are the one big hit the game announces: they are
+# listed in `projectiles` with a velocity, and only gravity acts on them.
+DODGE = {
+    "gravity": 22.0,
+    "splash_r": 7.0,                # splash falls to 30% at this radius
+    "margin": 4.0,                  # clear the edge, do not graze it
+    "horizon_s": 3.0,               # shells further out than this may still be aimed elsewhere
+    "min_react_s": 0.2,             # below this we cannot move far enough to matter
+}
+
 DANGER = {
     "view_range": 200.0,            # enemies see this far (vision range)
     "rays": 120,                    # viewshed rays per enemy (3 degrees apart)
     "cone_deg": 120.0,              # enemy view cone; cells inside it cost more
     "seen_cost": 4.0,               # extra cost of a cell an enemy can see (close end)
     "cone_mult": 1.8,
-    "heat_cost": 1.5,               # per unit of sound heat
+    # Sound is the only thing we know about the enemies we cannot see, which is most of them
+    # most of the time. At 1.5 the heat from a gun fired inside 60 m peaked at under half of
+    # one visible enemy's sight line, so hearing a fight nearby barely moved us. 2.5 x cap 3
+    # puts a loud, close, recent sound on a par with standing in somebody's cone.
+    "heat_cost": 2.5,               # per unit of sound heat
     "pull_max": 0.85,               # danger counts for only 15% standing on a wanted item...
     "pull_radius": 24.0,            # ...fading to full price this far out (squared falloff)
     "pull_items_max": 24,           # nearest N wanted items build the pull wells (cost guard)

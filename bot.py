@@ -22,7 +22,7 @@ from danger import DangerMap  # noqa: E402
 from recon import Recon  # noqa: E402
 import utility  # noqa: E402
 from tracker import Tracker, angdiff  # noqa: E402
-from tuning import COVER, DANGER, JUDGE, LOOT, MOVE, PROBE, SCAN, SHOOT, UPGRADE_PRIORITY, UTIL  # noqa: E402
+from tuning import COVER, DANGER, DODGE, JUDGE, LOOT, MOVE, PROBE, SCAN, SHOOT, UPGRADE_PRIORITY, UTIL  # noqa: E402
 from worldmap import WorldMap  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -113,6 +113,11 @@ class Bot:
         self.land_pt = None     # where the descent is steering for
         self.land_t = -1e9
         self.hold_t0 = None     # when we last started holding still on a camp/cover spot
+        self.dodging = False
+        self.panicking = False
+        self.last_target_id = None
+        self.engage_id, self.engage_hp, self.engage_t0 = None, 0.0, 0.0
+        self.give_up = {}   # item id -> when we gave up on it
         self.loot_target = None
         self.last_target_t = -1e9
         self.idle_t = 0.0
@@ -207,7 +212,15 @@ class Bot:
         sit.threat_bearing = bearings[-1] if bearings else None
 
         # pick the target and its advantage
-        best, bscore = None, -1e9
+        # Target choice: expected damage per second against this one, weighted by how much it
+        # matters, divided by the time it costs to point at it. Score is kills, so one we can
+        # finish is worth far more than one we can merely hurt, and a shot we are already lined
+        # up on beats a better one across the map -- the torso only turns at turn_rate.
+        turn = max(0.5, me.get("stats", {}).get("turn_rate", 4.0))
+        my_yaw = me["aim"][0]
+        worst = max(threats, key=lambda q: q["their"], default=None)
+        best, bscore, best_lethal = None, -1e9, False
+        foc, foc_score, foc_lethal = None, -1e9, False
         for h in threats:
             if not h["los"] and not h["engaged"]:
                 continue
@@ -216,16 +229,46 @@ class Bot:
             adv = ttk_them / ttk_us
             adv *= max(0.2, 1.0 - JUDGE["exposure_penalty"] * max(0, n_exposed - 1))
             h["adv"] = adv
-            score = (3.0 if h["attacking"] else 0.0) + (2.0 if h["engaged"] else 0.0) \
-                + (2.5 if h["hp_frac"] < 0.3 else 0.0) - h["d"] / 80.0 + (1.0 if h["los"] else -2.0)
+            dps = h["ours"] * (JUDGE["pri_rear"] if h["we_rear"] else 1.0)
+            pri = 1.0 + h["their"] / 120.0
+            if ttk_us <= JUDGE["killable_s"]:
+                pri *= JUDGE["pri_killable"]
+            if getattr(h["tr"], "charging", False):
+                pri *= JUDGE["pri_charging"]
+            if h["attacking"]:
+                pri *= JUDGE["pri_attacking"]
+            if not h["los"]:
+                pri *= JUDGE["pri_nolos"]
+            if (worst is not None and worst is not h
+                    and abs(angdiff(h["bearing"], worst["bearing"])) > JUDGE["backturn_rad"]):
+                pri *= JUDGE["pri_backturn"]
+            slew = abs(angdiff(h["bearing"], my_yaw)) / turn
+            score = dps * pri / (1.0 + JUDGE["slew_w"] * slew)
+            lethal = ttk_us <= JUDGE["killable_s"]
+            if h["tr"].id == self.last_target_id:
+                foc_score, foc, foc_lethal = score, h, lethal
             if score > bscore:
-                bscore, best = score, h
+                bscore, best, best_lethal = score, h, lethal
+        # Focus lock. A kill needs 1400 damage inside the 5 s regen window, so damage spread
+        # over two mechs heals off both and buys nothing: we were spending 3120 damage per kill,
+        # more than twice a mech's HP. Stay on the current target unless the challenger is decisively
+        # better -- or unless it can be finished now and the current one cannot, which is the
+        # one swap that converts damage into score.
+        if foc is not None and not (best_lethal and not foc_lethal):
+            if bscore < foc_score * JUDGE["focus_margin"]:
+                best = foc
+        self.last_target_id = best["tr"].id if best is not None else None
         sit.target = best
         # auto-lock: any enemy mech we can see and hit; prefer attackers, low HP, then closest
         lk, lscore = None, -1e9
+        w1 = (me.get("weapons") or [None, None])[1]
+        poke = SHOOT["poke_max_laser_m"] if (w1 and w1.get("kind") == "laser") else SHOOT["poke_max_m"]
         for h in threats:
             if not h["los"] or h["d"] > SHOOT["lock_range"]:
                 continue
+            if (h["d"] > poke and not h["attacking"] and not h["engaged"]
+                    and h["hp_frac"] > SHOOT["poke_wounded_frac"]):
+                continue    # idle bystander far away: shooting it just adds a hunter
             sc = (3.0 if h["attacking"] else 0.0) + 2.0 * (1.0 - h["hp_frac"]) - h["d"] / 60.0
             if sc > lscore:
                 lscore, lk = sc, h
@@ -272,6 +315,12 @@ class Bot:
         adv = sit.adv
         if self.cover is not None and sit.target is not None and self.cover["tid"] == sit.target["tr"].id:
             adv *= COVER["adv_bonus"]
+        # Below panic_hp and taking fire, the arithmetic stops mattering: 30% of 1400 is two
+        # gun bursts, and a fight we might win on paper is one we cannot afford to be wrong
+        # about. Break off and spend the energy.
+        self.panicking = danger and sit.hp_frac < MOVE["panic_hp"] and sit.finish is None
+        if self.panicking:
+            retreat_now = True
         if danger:
             self.last_danger_t = t
             if sit.finish is None and (adv < JUDGE["flee_adv"] or (low and adv < JUDGE["low_hp_flee_adv"])
@@ -352,6 +401,8 @@ class Bot:
         if sit.outside or sit.zone_need > walk * MOVE["zone_boost_ratio"]:
             return 1.0, energy > 5
         if st == "Retreating" or sit.multi_angle:
+            if self.panicking:
+                return 1.0, energy > 5      # getting out is worth every point of energy
             return 1.0, energy > MOVE["fight_boost_energy_min"] * 0.5
         if st in ("Fighting",):
             return 1.0, energy > MOVE["fight_boost_energy_min"]
@@ -367,7 +418,11 @@ class Bot:
         hot = self.tr.heat_near(px, py, MOVE["stealth_radius"] * 0.6) > 0.8
         if near < MOVE["stealth_radius"] or hot or st == "Flanking":
             return creep, False
-        return 1.0, False
+        # Cool ground, nobody within earshot: cover it at a run. Boost is 19.5 m/s for 17
+        # energy/s against 18/s regen, so short bursts across safe open ground are close to
+        # free, and the time saved is time the squad is not using to add another hunter.
+        return 1.0, (energy > MOVE["roam_boost_energy_min"]
+                     and self.dm.at(px, py) < MOVE["roam_boost_max_danger"])
 
     def act_hide(self, obs):
         """Probe: hide. Silent creep to a covered ground spot by the next zone edge; never shoot or loot."""
@@ -682,6 +737,41 @@ class Bot:
         f = UTIL["hold_floor"]
         return f + (1.0 - f) * math.exp(-(obs["t"] - self.hold_t0) / UTIL["hold_decay_s"])
 
+    def dodge_shell(self, obs, px, py, pz):
+        """Step out from under an incoming mortar, or return None.
+
+        A shell is 200 on a direct hit plus 160 splash falling off over 7 m, the biggest burst
+        in the game -- and the only one that announces itself. It is listed in `projectiles`
+        with a position and a velocity and nothing but gravity acts on it, so where it lands is
+        arithmetic. Walking out of a circle we can compute is the cheapest HP in the match.
+        """
+        best = None
+        for p in obs.get("projectiles", []):
+            if p.get("kind") != "mortar":
+                continue
+            x, y, z = p["pos"]
+            vx, vy, vz = p.get("vel") or (0.0, 0.0, 0.0)
+            g = DODGE["gravity"]
+            disc = vz * vz + 2.0 * g * (z - pz)
+            if disc <= 0.0:
+                continue
+            t_hit = (vz + math.sqrt(disc)) / g          # when it returns to our height
+            if not (DODGE["min_react_s"] < t_hit < DODGE["horizon_s"]):
+                continue
+            ix, iy = x + vx * t_hit, y + vy * t_hit
+            d = math.hypot(ix - px, iy - py)
+            if d > DODGE["splash_r"] + DODGE["margin"]:
+                continue
+            if best is None or t_hit < best[0]:
+                best = (t_hit, ix, iy, d)
+        if best is None:
+            return None
+        _, ix, iy, d = best
+        dx, dy = px - ix, py - iy
+        if d < 1e-3:
+            dx, dy = math.cos(self.rng.random() * 6.28), math.sin(self.rng.random() * 6.28)
+        return unit(dx, dy)
+
     def pick_landing(self, obs, px, py):
         """Where to come down: the coolest cell we can glide to, standing still included.
 
@@ -758,8 +848,12 @@ class Bot:
         sit = self.assess(obs)
         # stable order, not sorted by distance: the danger map caches its wells on this tuple,
         # and re-sorting every tick would rebuild them every tick for no gain
+        # Crates belong here too: they are a cube plus half a weapon, and leaving them out
+        # meant the ground around a crate never went cool, so the danger term argued against
+        # walking to one and the map showed no blue where the loot was.
         want = tuple([(c["pos"][0], c["pos"][1]) for c in self.tr.cubes.values()] +
-                     [(p["pos"][0], p["pos"][1]) for p in self.tr.pickups.values()])
+                     [(p["pos"][0], p["pos"][1]) for p in self.tr.pickups.values()] +
+                     [(c["pos"][0], c["pos"][1]) for c in self.tr.crates.values()])
         # back off the refresh after a slow tick: knowledge a fraction of a second staler is
         # cheap, a missed 50 ms answer is a tick with no shot
         self.rc.update(t, me["pos"], me["aim"][0], self.vis_range, self.vis_fov,
@@ -822,8 +916,35 @@ class Bot:
                     self.hold_t0 = None
                 elif self.hold_t0 is None:
                     self.hold_t0 = t
-                hold = ((o.kind in ("crate", "npc") and dist < LOOT["crate_engage_dist"])
-                        or (o.kind == "drop" and dist < 4.0) or on_spot)
+                # Only stand and shoot something we can actually see this tick. Memory tells
+                # us where a crate is, not that we have a shot at it: holding position to fire
+                # at a remembered crate behind a tree is how we froze for 15 s.
+                # Standing at a crate only makes sense if the crate is what we will shoot.
+                # An auto-lock on any visible enemy outranks Looting, so with someone in sight
+                # we were parked at a crate putting our rounds into a mech -- the crate took no
+                # damage, and the progress timer shelved it.
+                busy = (sit.finish is not None or sit.third is not None or sit.lock is not None
+                        or (sit.target is not None and sit.target["engaged"]))
+                shootable = (not busy and o.item is not None and dist < LOOT["crate_engage_dist"]
+                             and ((o.kind == "crate" and o.item[1] in self.tr.vis_crates)
+                                  or (o.kind == "npc" and o.item[1] in self.tr.tracks
+                                      and self.tr.tracks[o.item[1]].visible)))
+                if not shootable:
+                    # The timeout must measure time spent actually shooting, not wall clock
+                    # since we first wanted this crate. Leaving it armed across stretches where
+                    # we were out of range or had lost sight meant it fired the instant the
+                    # crate came back, shelving crates we had barely hit.
+                    self.engage_id = None
+                if shootable and o.kind == "crate":
+                    # and it has to be dying. If its HP has not moved, we are not hurting it.
+                    hp_now = self.tr.crates.get(o.item[1], {}).get("hp", 0.0)
+                    if self.engage_id != o.item[1] or hp_now < self.engage_hp - 1.0:
+                        self.engage_id, self.engage_hp, self.engage_t0 = o.item[1], hp_now, t
+                    elif t - self.engage_t0 > LOOT["engage_timeout_s"]:
+                        self.give_up[o.item[1]] = t     # shelve it and let the planner move on
+                        self.plan = self.plan_key = None
+                        shootable = False
+                hold = (shootable or (o.kind == "drop" and dist < 4.0) or on_spot)
                 if not hold:
                     mx, my = self.follow(obs, o.x, o.y, replan_s=1.5)
                 if o.kind == "camp" and dist < MOVE["arrive_radius"]:
@@ -851,6 +972,13 @@ class Bot:
                         self.cover = None
                         mx, my, jump = self.fight_move(obs, h, chase=(st == "Finishing"))
         scale, boost = self.speed_mode(obs, sit)
+        dg = self.dodge_shell(obs, px, py, pz)
+        if dg is not None:
+            # nothing we were doing is worth 360 damage; sprint, and never creep
+            mx, my = dg
+            scale, self.dodging = 1.0, True
+        else:
+            self.dodging = False
         if st not in ("Fighting", "Finishing"):
             mx, my = self.avoid_walls(px, py, mx, my)
         # stuck detection
@@ -1154,7 +1282,7 @@ class Bot:
             mode = "fight"
         if target is not None:
             e = target["tr"]
-            s = self.cb.shot(me, e.pos, e.vel, e.cubes, "mech")
+            s = self.cb.shot(me, e.pos, e.vel, e.cubes, "mech", flip_rate=e.flip_rate)
             cv = self.cover
             if cv is not None and cv["phase"] == "hide" and cv["tid"] == e.id and self.move_state == "Fighting":
                 # behind cover: pre-aim at the target, reload, charge the laser for the next peek

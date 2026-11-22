@@ -15,6 +15,8 @@ import os
 import time
 
 SQRT2 = math.sqrt(2.0)
+# how many 1.5 m samples inside tree crowns before a sight line is considered blocked
+LOS_CANOPY_STEPS = 6
 
 
 class WorldMap:
@@ -245,12 +247,24 @@ class WorldMap:
             return True
         n = int(d / step) + 1
         top, nx, ny, x0, y0, inv = self.top, self.nx, self.ny, self.x0, self.y0, self.inv
+        can, nnx, nny, ninv = self.canopy, self.nnx, self.nny, self.ninv
+        shade = 0
         for q in range(1, n):
             f = q / n
-            i = int((ax + dx * f - x0) * inv)
-            j = int((ay + dy * f - y0) * inv)
+            px, py = ax + dx * f, ay + dy * f
+            i = int((px - x0) * inv)
+            j = int((py - y0) * inv)
             if 0 <= i < nx and 0 <= j < ny and top[j * nx + i] > az + dz * f:
                 return False
+            # Canopy does not stop a shot, but it does stop sight: a line that spends long
+            # enough inside crowns is blocked. Without this the danger map had enemies seeing
+            # straight through woodland, so it priced cover as open ground.
+            I = int((px - x0) * ninv)
+            J = int((py - y0) * ninv)
+            if 0 <= I < nnx and 0 <= J < nny and can[J * nnx + I]:
+                shade += 1
+                if shade >= LOS_CANOPY_STEPS:
+                    return False
         return True
 
     def walk_clear(self, ax, ay, bx, by):

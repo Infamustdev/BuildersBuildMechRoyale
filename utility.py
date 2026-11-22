@@ -32,6 +32,9 @@ def plan(bot, obs, sit, camp):
     me = obs["self"]
     px, py, pz = me["pos"]
     walk = me.get("stats", {}).get("walk_speed", 11.7)
+    # Travel is priced at full walk with a path-inflation factor, not at the speed we happen
+    # to be creeping at: costing it at creep roughly doubled the penalty and deleted distant
+    # loot from the option list entirely.
     tr, dm, wm = bot.tr, bot.dm, bot.wm
     hp = sit.hp_frac
     losing = sit.adv < 1.0 and bool(sit.engaged or sit.unseen_dps > 0)
@@ -83,15 +86,23 @@ def plan(bot, obs, sit, camp):
             # the weapon we end up holding decides every fight for the rest of the match, so
             # rank counts for itself and not only for the size of the upgrade: a laser is the
             # prize, and worth crossing the map for while nobody is contesting it
-            r = (UTIL["r_weapon_empty"] if slot1 is None else UTIL["r_weapon_upgrade"] * gain)
-            r = (r + UTIL["r_weapon_rank"] * rank.get(k, 0)) * uncontested(x, y)
+            # Scale the empty-slot bonus by how good the weapon is, do not add it flat. A flat
+            # bonus made a mortar two thirds as attractive as a laser purely for filling the
+            # slot, which is how we walked past a near crate for a far mortar.
+            base = UTIL["r_weapon_empty"] if slot1 is None else UTIL["r_weapon_upgrade"] * gain
+            r = base * LOOT["weapon_value"].get(k, 0.5) * uncontested(x, y)
             opts.append(Option("weapon", ("weapon", pid), x, y, z, r, ("weapon", pid)))
     if hp >= UTIL["farm_min_hp"]:
         for cid, c in tr.crates.items():
             x, y, z = c["pos"]
+            if obs["t"] - bot.give_up.get(cid, -1e9) < LOOT["give_up_s"]:
+                continue            # we stood there shooting it and nothing happened
             if reachable(x, y, z):
+                # with nobody in sight there is nothing better to do with the time, and a
+                # crate is a cube plus half a weapon -- the upgrades are how we win later
+                quiet = UTIL["crate_quiet"] if not sit.threats else 1.0
                 opts.append(Option("crate", ("crate", cid), x, y, z,
-                                   UTIL["r_crate"] * uncontested(x, y), ("crate", cid)))
+                                   UTIL["r_crate"] * quiet * uncontested(x, y), ("crate", cid)))
         for n in tr.npcs():
             x, y, z = n.pos
             opts.append(Option("npc", ("npc", n.id), x, y, z, UTIL["r_npc"], ("npc", n.id)))
@@ -172,7 +183,12 @@ def plan(bot, obs, sit, camp):
         dn = math.hypot(o.x - z["next_center"][0], o.y - z["next_center"][1]) - z["next_radius"]
         zone_pen = UTIL["w_zone"] * max(0.0, dn) / 50.0
         danger = dm.at(o.x, o.y) + UTIL["path_danger_frac"] * dm.line_cost(px, py, o.x, o.y)
-        o.score = o.reward - dw * danger - UTIL["w_travel"] * d / walk - zone_pen
+        # Discount the reward by travel time instead of subtracting a cost from it. Subtraction
+        # drives anything far away negative, so it stops being an option at all; dividing keeps
+        # a valuable thing worth going to get -- a big cube pile 12 s away still scores a third
+        # of its value rather than nothing.
+        eta = d * UTIL["path_inflate"] / walk
+        o.score = o.reward / (1.0 + eta / UTIL["eta_scale"]) - dw * danger - zone_pen
         if bot.plan_key is not None and o.key == bot.plan_key:
             bonus = UTIL["stick_bonus"]
             if o.kind not in HOLD_KINDS:

@@ -66,8 +66,15 @@ class Combat:
         s = 1.0 + self.size_per_cube * (cubes or 0)
         return (tpos[0], tpos[1], tpos[2] + 4.5 * s)
 
-    def lead(self, origin, tpos, tvel, speed, cubes=0, kind="mech", extra_t=0.0):
-        """Predict where a projectile of `speed` meets the target. Returns (point, flight_time)."""
+    def lead(self, origin, tpos, tvel, speed, cubes=0, kind="mech", extra_t=0.0, flip_rate=0.0):
+        """Predict where a projectile of `speed` meets the target. Returns (point, flight_time).
+
+        Horizontal velocity is damped by the telegraph factor f = (1 - e^(-2.r.T)) / (2.r.T),
+        where r is how often this target reverses. Leading a juking mech by its full current
+        velocity aims at where it would be if it kept going, which is exactly what it will not
+        do; f is the least-squares lead for a target that flips at Poisson rate r, and tends to
+        1 for a steady walker and to 0 for something thrashing back and forth.
+        """
         c = self.target_center(tpos, cubes, kind)
         t = 0.0
         g = self.mech.get("gravity", 22.0)
@@ -77,7 +84,11 @@ class Combat:
             tt = t + extra_t
             z = c[2] + (vz * tt - 0.5 * g * tt * tt if abs(vz) > 0.5 else 0.0)
             z = max(z, self.wm.surface(c[0], c[1]) + 1.0) if abs(vz) > 0.5 else z
-            p = (c[0] + tvel[0] * tt, c[1] + tvel[1] * tt, z)
+            f = 1.0
+            if flip_rate > 1e-6 and tt > 1e-6:
+                k = 2.0 * flip_rate * tt
+                f = (1.0 - math.exp(-k)) / k
+            p = (c[0] + tvel[0] * tt * f, c[1] + tvel[1] * tt * f, z)
             d = math.dist(origin, p)
             t = d / speed if speed > 0 else 0.0
         return p, t
@@ -104,7 +115,7 @@ class Combat:
         sv = math.sqrt((sig_s * d) ** 2 + (0.3 * dodge) ** 2 + (err_p * d) ** 2 + 0.09)
         return erf(radius / (sh * math.sqrt(2))) * erf(half_h / (sv * math.sqrt(2)))
 
-    def shot(self, me, tpos, tvel, cubes=0, kind="mech", radius=None, half_h=None):
+    def shot(self, me, tpos, tvel, cubes=0, kind="mech", radius=None, half_h=None, flip_rate=0.0):
         """Everything needed to shoot at a target at tpos with velocity tvel."""
         s = Shot()
         W = self.W
@@ -118,7 +129,7 @@ class Combat:
         if half_h is None:
             half_h = (1.75 if kind == "npc" else 4.5 * size)
         o = self.muzzle(me)
-        p, ft = self.lead(o, tpos, tvel, gun.get("speed", 252.0), cubes, kind)
+        p, ft = self.lead(o, tpos, tvel, gun.get("speed", 252.0), cubes, kind, flip_rate=flip_rate)
         s.point = p
         s.flight = ft
         s.yaw, s.pitch = self.yaw_pitch(o, p)
@@ -139,7 +150,7 @@ class Combat:
             s.gun_lined = ey <= math.atan(radius * frac / s.d) and ep <= math.atan(half_h * frac / s.d)
         lz = W.get("laser", {})
         # laser is hitscan: lead only by the ~0.1 s until the release lands
-        lp, _ = self.lead(o, tpos, tvel, 1e9, cubes, kind, extra_t=0.1)
+        lp, _ = self.lead(o, tpos, tvel, 1e9, cubes, kind, extra_t=0.1, flip_rate=flip_rate)
         s.laser_aim = self.yaw_pitch(o, lp)
         s.in_laser_range = s.d <= lz.get("range", 280.0)
         if s.los and s.in_laser_range:
@@ -340,6 +351,22 @@ class Combat:
             ammo = w.get("ammo", 1)
             if w.get("reload", 0) > 0 or ammo <= 0:
                 reload = ammo <= 0 and w.get("reload", 0) <= 0
-            elif s.gun_lined:
-                fire[i] = True  # every lined-up shot, no hit-chance threshold
+            else:
+                # Fire on expected value, not on "the crosshair crossed them". A miss costs a
+                # round, the reload that follows and a 320 m noise; the threshold is lower up
+                # close and against something we can finish, higher when the magazine is nearly
+                # out and a reload would take us out of the fight.
+                if mode in ("crate", "npc"):
+                    # A crate does not dodge and does not shoot back. Gating it on hit
+                    # probability starved the damage check that decides whether we are making
+                    # progress, so we shelved crates we were standing in front of.
+                    need = 0.0
+                else:
+                    need = SHOOT["p_fire"]
+                    if s.d < SHOOT["p_fire_near_m"] or mode == "finish":
+                        need = SHOOT["p_fire_near"]
+                    elif ammo <= SHOOT["p_fire_low_ammo"]:
+                        need = SHOOT["p_fire_low"]
+                if s.gun_lined and s.p_gun >= need:
+                    fire[i] = True
         return aim, fire, reload
