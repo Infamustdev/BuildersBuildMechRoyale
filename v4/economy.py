@@ -9,7 +9,8 @@ Owns the action fields `pick`, `take`, `drop`, and publishes a loot goal the leg
   heading straight to the hunt goal (plain distance when there is none), divided again by
   1 + 0.5 x enemies that can see the item's cell. Values: weapon 130 (60 if slot 1 is full,
   150 for a laser up to 240 m), cube 75 (25 at the cube cap, within 105 m), crate 45 and a drone
-  85 (only above 50% HP, no danger, within 150 m). Same item held 30 s without reaching it ->
+  85 (only above 50% HP, no danger, within 150 m; no drones while a mech was seen within 150 m
+  in the last 10 s). Same item held 30 s without reaching it ->
   banned 60 s. Items off the ground (roofs) or near the zone edge are skipped.
 - Fight scoop: during a fight, the nearest cube within 70 m (40 m below half HP), unless a
   lightning carrier stands next to it and we have no lightning.
@@ -159,7 +160,8 @@ class Economy:
             for iid, c in mem.crates.items():
                 if math.hypot(c["pos"][0] - x, c["pos"][1] - y) < LOOT_R:
                     consider("crate", iid, c["pos"], cube_v * 0.6)
-            if int(me.get("cubes", 0)) < self.cube_cap:
+            mech_near = any(math.hypot(e.pos[0] - x, e.pos[1] - y) < 150.0 for e in mem.recent_mechs(10.0))
+            if int(me.get("cubes", 0)) < self.cube_cap and not mech_near:   # mechs before drones
                 for tr in mem.tracks.values():
                     if tr.kind == "npc" and t - tr.seen_t < 12.0 and math.hypot(tr.pos[0] - x, tr.pos[1] - y) < LOOT_R:
                         consider("npc", tr.id, tr.pos, 85.0)

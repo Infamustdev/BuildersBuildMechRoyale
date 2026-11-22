@@ -362,24 +362,39 @@ class Heat:
                 bs, best = s, wm.ncenter(K)
         return best
 
-    def hunt_goal(self, x, y, zone, max_age=45.0):
-        """Where to go looking for the next fight: the best recent enemy cell (distance + 3 m per
-        second of age, 40-300 m away, inside the zone), else the likely-enemy hotspot within
-        200 m. (x, y, kind) or None."""
+    def hunt_goal(self, x, y, zone, mem=None, max_age=45.0, prefer=None, banned=None):
+        """Where to go looking for the next fight: the last seen spot of the nearest mech seen in
+        the last 15 s (within 250 m, inside the zone); else the best recent enemy cell (distance
+        + 3 m per second of age, 40-300 m away); else the likely-enemy hotspot within 200 m.
+        The current spot (`prefer`) counts 30 m closer so near-equal spots do not trade places;
+        `banned(x, y)` spots are skipped. (x, y, kind, mech id or None) or None."""
+        def bonus(px, py):
+            return -30.0 if prefer is not None and math.hypot(px - prefer[0], py - prefer[1]) < 10.0 else 0.0
+
+        def skip(px, py):
+            return banned is not None and banned(px, py)
         zx, zy = zone["center"]
         zr = zone["radius"] - 10.0
         best, bs = None, 1e18
+        if mem is not None:
+            for tr in mem.recent_mechs(15.0):
+                d = math.hypot(tr.pos[0] - x, tr.pos[1] - y)
+                s = d + 4.0 * (self.t - tr.seen_t) + bonus(tr.pos[0], tr.pos[1])
+                if d < 250.0 and math.hypot(tr.pos[0] - zx, tr.pos[1] - zy) <= zr and s < bs and not skip(tr.pos[0], tr.pos[1]):
+                    bs, best = s, (tr.pos[0], tr.pos[1], "track", tr.id)
+            if best is not None:
+                return best
         for cx, cy, age in self.enemy_cell_list(max_age):
             d = math.hypot(cx - x, cy - y)
             if not 40.0 <= d <= 300.0 or math.hypot(cx - zx, cy - zy) > zr:
                 continue
-            s = d + 3.0 * age
-            if s < bs:
-                bs, best = s, (cx, cy, "seen")
+            s = d + 3.0 * age + bonus(cx, cy)
+            if s < bs and not skip(cx, cy):
+                bs, best = s, (cx, cy, "seen", None)
         if best is None:
             h = self.hotspot(x, y, 200.0, HEARD_MIN)
             if h is not None and math.hypot(h[0] - x, h[1] - y) > 25.0:
-                best = (h[0], h[1], "heard")
+                best = (h[0], h[1], "heard", None)
         return best
 
     def enemy_cell_list(self, max_age):

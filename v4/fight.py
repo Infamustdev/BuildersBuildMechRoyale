@@ -39,6 +39,14 @@ class Fight:
         self.mode = "fight"
         self._ring = None
 
+    def strafe_dir(self, t):
+        """Current strafe side (+1/-1), flipped every 0.3-1.0 s like fight movement."""
+        if t >= self.strafe_until:
+            if self.rng.random() < 0.6:
+                self.strafe = -self.strafe
+            self.strafe_until = t + 0.3 + self.rng.random() * 0.7
+        return self.strafe
+
     def _ring_offsets(self):
         if self._ring is None:
             N = self.wm.N

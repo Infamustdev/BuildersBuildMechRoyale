@@ -5,13 +5,17 @@ without either waiting on the other.
 
 Engage (squad stance): hit us in the last 6 s, or seen this tick and any of: within 60 m, closing
 faster than 3 m/s inside 180 m, below 40% HP inside 160 m, aiming at us (0.22 rad) inside 190 m,
-or the endgame (next zone radius <= 70 m or 3 mechs left).
+the endgame (next zone radius <= 70 m or 3 mechs left), or - when we are above 60% HP - any mech
+we have a shot line to inside 95 m (120 m with a laser), if we hold a laser or it has under 75%
+of our HP, so we take the fights we should win early.
 Retreat (held 1.5 s after it clears, never in the endgame):
-  outnumbered - 2+ mechs in sight within 160 m and HP < 55%, or 3+ and HP < 80%, or HP < 35%
+  outnumbered - 2+ mechs in sight within 160 m and HP < 55%, or 3+ and HP < 80%, or 2+ coming
+                at us (closing > 1 m/s or inside 40 m) and HP < 80%, or 3+ coming at any HP;
+                never when every nearby mech is moving away (we chase those); or HP < 35%
                 against a target 10 points healthier; cancelled when the target is under 25%,
                 we are above 20% and at most two are near (finish it instead)
   red         - the heat route cost of our own cell is red: >= 8 (about three enemies watching,
-                or two plus likely-enemy heat), or >= 6 once HP is under 80%
+                or two plus likely-enemy heat), or >= 6 once HP is under 70%
 Pressed: retreating, or our own cell's route cost >= 6. The economy then only takes
 loot that sits in a cooler cell than ours, and the escape route prefers cool cells with a cube.
 While retreating the HP weight in the target score rises to 0.6, so we keep shooting the weakest.
@@ -30,6 +34,13 @@ LOW_BONUS = 200.0
 STICK = 200.0
 STICK_S = 2.0
 RETREAT_HOLD_S = 1.5
+FLEE_SPEED = 2.0           # moving away from us faster than this counts as fleeing
+CHASE_HP = 0.35            # chase fleeing mechs above this HP
+ENGAGE_IDLE_D = 95.0       # engage an idle mech we can shoot inside this (healthy only)
+ENGAGE_IDLE_LASER = 120.0
+ENGAGE_IDLE_HP = 0.6
+ENGAGE_IDLE_EDGE = 0.75    # ...without a laser, only if its HP is under this x ours
+RED_HURT_HP = 0.7          # the amber (>= 6) retreat needs HP below this
 RED_COST, RED_COST_HURT = 8.0, 6.0
 RETREAT_HP_W = 0.6
 
@@ -64,6 +75,7 @@ class Judge:
         self.why = ""           # "outnumbered" / "red" while retreating
         self.here_cost = 0.0    # route cost of our cell, ignoring the target
         self.pressed = False
+        self.swarm = False      # 3+ mechs coming at us: run even without a cool cell close by
         # per tick outputs
         self.engaged = []       # Tracks that count as a fight
         self.target = None      # Track we shoot
@@ -72,6 +84,7 @@ class Judge:
         self.farm_kind = None   # "npc" / "crate" when the solution is on loot, not a mech
         self.muzzle = (0.0, 0.0, 0.0)
         self.los = {}           # id -> shot line from our muzzle this tick
+        self.closing = {}       # id -> closing speed toward us (m/s, negative = moving away)
         self.dist = {}
 
     @staticmethod
@@ -115,7 +128,7 @@ class Judge:
 
         hp_frac = me["hp"] / max(1.0, me["max_hp"])
         hp_w = RETREAT_HP_W if self.retreat else HP_W
-        self.engaged, self.los, self.dist = [], {}, {}
+        self.engaged, self.los, self.dist, self.closing = [], {}, {}, {}
         target, foe, best = None, None, 1e18
         danger = False
         for tr in mem.recent_mechs(2.5):
@@ -130,6 +143,7 @@ class Judge:
                     self.wm.los(muzzle, (tr.pos[0], tr.pos[1], tr.pos[2] + h * 0.85), canopy=False)
             self.los[tr.id] = los
             closing = -((tr.vel[0] - vx) * dx + (tr.vel[1] - vy) * dy) / d if d > 1.0 else 0.0
+            self.closing[tr.id] = closing
             hit_ago = t - tr.last_hit_us_t
             engage = False
             if now_seen:
@@ -137,7 +151,16 @@ class Judge:
                 engage = (d < ENGAGE_D or hit_ago < 6.0 or late
                           or (closing > 3.0 and d < 180.0)
                           or (tr.hp < 0.4 * tr.max_hp and d < 160.0)
-                          or (aimed and d < 190.0))
+                          or (aimed and d < 190.0)
+                          # running away from us: chase it
+                          or (closing < -FLEE_SPEED and d < 160.0 and los and hp_frac >= CHASE_HP)
+                          # take the fight early: an idle mech we can shoot, close enough that
+                          # opening fire does not recruit the far side of the map
+                          or (los and hp_frac >= ENGAGE_IDLE_HP
+                              and d < (ENGAGE_IDLE_LASER if laser is not None else ENGAGE_IDLE_D)
+                              # only with an edge: a laser to trade at range, or it is clearly
+                              # weaker than us (counted HP, not a modelled duel)
+                              and (laser is not None or tr.hp < ENGAGE_IDLE_EDGE * me["hp"])))
             if engage or hit_ago < 4.0:
                 danger = True
             if not engage:
@@ -177,8 +200,16 @@ class Judge:
 
     def _retreat(self, mem, me, hp_frac, late, target, heat):
         t = mem.t
-        near = sum(1 for e in mem.recent_mechs(0.01) if self.dist.get(e.id, 1e9) < 160.0)
-        losing = (near >= 2 and hp_frac < 0.55) or (near >= 3 and hp_frac < 0.80)
+        near_ids = [e.id for e in mem.recent_mechs(0.01) if self.dist.get(e.id, 1e9) < 160.0]
+        near = len(near_ids)
+        # who is coming for us: closing in, or already inside 40 m
+        coming = sum(1 for i in near_ids if self.closing.get(i, 0.0) > 1.0 or self.dist.get(i, 1e9) < 40.0)
+        fleeing = sum(1 for i in near_ids if self.closing.get(i, 0.0) < -FLEE_SPEED)
+        losing = ((near >= 2 and hp_frac < 0.55) or (near >= 3 and hp_frac < 0.80)
+                  or (coming >= 2 and hp_frac < 0.80) or coming >= 3)
+        if near and fleeing == near:
+            losing = False        # they are running from us: hunt them instead
+        self.swarm = coming >= 3
         if target is not None:
             tf = target.hp / max(1.0, target.max_hp)
             if hp_frac < 0.35 and tf > hp_frac + 0.1:
@@ -190,7 +221,7 @@ class Judge:
         if heat is not None:
             K = self.wm.nidx(me["pos"][0], me["pos"][1])
             c = heat.route_cost(K) if K >= 0 else 0.0
-            red = c >= RED_COST or (c >= RED_COST_HURT and hp_frac < 0.8)
+            red = c >= RED_COST or (c >= RED_COST_HURT and hp_frac < RED_HURT_HP)
             self.here_cost = heat.route_cost(K, target.id if target is not None else None) if K >= 0 else 0.0
         if (losing or red) and not late:
             self.lose_at = t

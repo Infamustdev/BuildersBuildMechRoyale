@@ -99,7 +99,9 @@ class Bot:
         ctx.loot_goal = self.loot_goal
         ctx.economy = self.economy
         me = obs["self"]
-        ctx.hunt = (self.heat.hunt_goal(me["pos"][0], me["pos"][1], obs["zone"])
+        legs, t_now = self.legs, obs["t"]
+        ctx.hunt = (self.heat.hunt_goal(me["pos"][0], me["pos"][1], obs["zone"], self.mem,
+                                        prefer=legs.hunt_pref, banned=lambda x, y: legs.banned(x, y, t_now))
                     if me["hp"] >= 0.6 * me["max_hp"] else None)
 
         move, boost, jump = self.legs.decide(ctx)
