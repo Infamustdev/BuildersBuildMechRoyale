@@ -46,6 +46,7 @@ class Memory:
         self.hits = []         # (t, by, bearing, weapon, amount) damage we took, last 10 s
         self.sounds = []       # this tick's sounds
         self.last_sound = None  # (t, bearing) of the last mech-made sound
+        self.laser_fired = {}   # mech id -> time it last fired its laser (2 s cooldown after)
         self.last_beam = None   # (t, x, y) muzzle of the last laser/lightning by a mech we cannot see
         self.pickups, self.crates, self.cubes = {}, {}, {}
         self.kills = 0
@@ -98,6 +99,8 @@ class Memory:
         for b in obs.get("beams", []) or []:
             tr = self.tracks.get(b.get("by"))
             path = b.get("path") or []
+            if tr is not None and b.get("kind", b.get("weapon")) == "laser":
+                self.laser_fired[tr.id] = t - float(b.get("age", 0.0))
             if path and not (tr is not None and tr.visible):
                 self.last_beam = (t - float(b.get("age", 0.0)), path[0][0], path[0][1])
         for p in obs.get("pickups", []):

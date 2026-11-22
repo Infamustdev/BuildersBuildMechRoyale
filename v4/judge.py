@@ -46,6 +46,15 @@ ENGAGE_IDLE_EDGE = 0.75    # ...without a laser, only if its HP is under this x 
 RED_HURT_HP = 0.7          # the amber (>= 6) retreat needs HP below this
 RED_COST, RED_COST_HURT = 8.0, 6.0
 RETREAT_HP_W = 0.6
+LEAVE_TTD = 10.0
+RETREAT_HP = 0.20
+RETURN_HP = 0.65
+DUEL_DISENGAGE = 0.5
+REAR_BONUS = 0.25
+LEAD_DAMP = 0.95
+HUNT_R, HUNT_ADV = 130.0, 0.70
+LASER_CD_S, LASER_CD_BONUS = 2.0, 40.0
+GUN_LEAD = 0.45           # fraction of the velocity lead to use on mechs (half of them jitter)
 
 
 class Solution:
@@ -74,6 +83,7 @@ class Judge:
         self.stick_id, self.stick_at = None, -1e9
         self.last_threat_at = -1e9
         self.lose_at = -1e9
+        self.cornered_at = -1e9
         self.retreat = False
         self.why = ""           # "outnumbered" / "red" while retreating
         self.here_cost = 0.0    # route cost of our cell, ignoring the target
@@ -109,7 +119,7 @@ class Judge:
         mx, my, mz = muzzle
         px = py = pz = 0.0
         for _ in range(4):
-            tt = AIM_LATENCY + t
+            tt = AIM_LATENCY + t * LEAD_DAMP
             px, py = tp[0] + tv[0] * tt, tp[1] + tv[1] * tt
             pz = tp[2] + (0.0 if grounded else tv[2] * tt * 0.5)
             d = math.sqrt((px - mx) ** 2 + (py - my) ** 2 + (pz - mz) ** 2)
@@ -155,7 +165,15 @@ class Judge:
             engage = False
             if now_seen:
                 aimed = abs(angdiff(tr.aim[0], math.atan2(-dy, -dx))) < 0.22
-                engage = (d < ENGAGE_D or hit_ago < 6.0 or late
+                tr_laser = "laser" in (tr.weapons or ())
+                # hunt: in sight, a duel we should win (advantage >= 0.7), inside 130 m, HP > 60%
+                hunt = False
+                if los and d < HUNT_R and hp_frac > 0.6:
+                    adv = (me["hp"] / max(self.their_dps(tr, d), 1.0)) / max(tr.hp / self.my_dps(me, d), 0.1)
+                    hunt = adv >= HUNT_ADV
+                engage = (d < ENGAGE_D or hit_ago < 6.0 or late or hunt
+                          or (aimed and tr_laser and d < 285.0)
+                          or (aimed and closing > 4.0 and d < 90.0)
                           or (closing > 3.0 and d < 180.0)
                           or (tr.hp < 0.4 * tr.max_hp and d < 160.0)
                           or (aimed and d < 190.0)
@@ -188,6 +206,10 @@ class Judge:
                 s -= 40.0
             if closing > 3.0:
                 s -= 15.0
+            if self.shows_back(tr, x, y):
+                s -= REAR_BONUS * abs(s)
+            if t - mem.laser_fired.get(tr.id, -1e9) < LASER_CD_S:
+                s -= LASER_CD_BONUS    # its laser is cooling: punish it now
             cands.append((tr, d))
             if s < best:
                 best, target = s, tr
@@ -221,40 +243,121 @@ class Judge:
                 return min(close, key=lambda c: c[0].hp)[0]
         return target
 
+    @staticmethod
+    def gun_hit(d):
+        """Our gun hit rate by range (measured)."""
+        if d < 60: return 0.95
+        if d < 120: return 0.95 - (d - 60) / 60 * 0.12
+        if d < 180: return 0.83 - (d - 120) / 60 * 0.10
+        if d < 230: return 0.73 - (d - 180) / 50 * 0.15
+        return 0.05
+
+    @staticmethod
+    def their_gun_hit(d):
+        """A typical opponent's gun hit rate on us by range."""
+        if d < 40: return 0.97
+        if d < 80: return 0.97 - (d - 40) / 40 * 0.12
+        if d < 120: return 0.85 - (d - 80) / 40 * 0.40
+        if d < 180: return 0.45 - (d - 120) / 60 * 0.30
+        return 0.1
+
+    def their_dps(self, tr, d):
+        """Rough damage per second a mech puts on us at range d (gun 45 / 0.24 s, laser 315 / ~2.4 s,
+        lightning inside 45 m)."""
+        w = tr.weapons or ()
+        cube = 1.0 + self.dmg_per_cube * min(int(tr.cubes or 0), self.cube_cap)
+        dps = 45.0 / 0.24 * 0.55 * self.their_gun_hit(d)
+        if "laser" in w and d < 285.0:
+            dps += 315.0 / 2.4
+        if "lightning" in w and d < 45.0:
+            dps += 60.0
+        return dps * cube
+
+    def my_dps(self, me, d):
+        """Rough damage per second we put out at range d with what we hold."""
+        cube = 1.0 + self.dmg_per_cube * min(int(me.get("cubes", 0)), self.cube_cap)
+        tot = 0.0
+        for w in (me.get("weapons") or [])[:2]:
+            if not w:
+                continue
+            k, ws = w.get("kind"), (w.get("stats") or {})
+            cd = max(0.05, float(ws.get("cooldown", 0.0) or 0.0))
+            rng = float(ws.get("range", 180.0))
+            if d > rng:
+                continue
+            if k == "gun":
+                tot += float(ws.get("damage", 45.0)) / max(cd, 0.12) * 0.55 * self.gun_hit(d)
+            elif k == "laser":
+                tot += float(ws.get("damage", 315.0)) / (float(ws.get("charge", 1.4)) + max(cd, 2.0))
+            elif k == "lightning" and float(me.get("energy", 0.0)) > 15.0:
+                tot += float(ws.get("damage", 12.0)) / max(cd, 0.1) * 0.8
+            elif k == "mortar":
+                tot += float(ws.get("damage", 120.0)) / max(cd, 2.5) * 0.4
+        return max(tot, 20.0) * cube
+
     def _retreat(self, mem, me, hp_frac, late, target, heat):
+        """Time-to-death retreat: leave when the damage we are taking would kill us soon, never
+        walk away from a kill one burst from done, and turn on a lone pursuer that corners us."""
         t = mem.t
-        # a mech counts toward "outnumbered" only if it is part of this fight: engaged with us,
-        # coming at us, or inside 80 m (a bystander 150 m away does not make a duel a 2-on-1)
+        hp = float(me["hp"])
         engaged_ids = {e.id for e in self.engaged}
         near_ids = [e.id for e in mem.recent_mechs(0.01) if self.dist.get(e.id, 1e9) < 160.0
                     and (e.id in engaged_ids or self.dist.get(e.id, 1e9) < 80.0
                          or self.closing.get(e.id, 0.0) > 1.0)]
-        near = len(near_ids)
-        # who is coming for us: closing in, or already inside 40 m
         coming = sum(1 for i in near_ids if self.closing.get(i, 0.0) > 1.0 or self.dist.get(i, 1e9) < 40.0)
-        fleeing = sum(1 for i in near_ids if self.closing.get(i, 0.0) < -FLEE_SPEED)
-        losing = ((near >= 2 and hp_frac < 0.55) or (near >= 3 and hp_frac < 0.80)
-                  or (coming >= 2 and hp_frac < 0.80) or coming >= 3)
-        if near and fleeing == near:
-            losing = False        # they are running from us: hunt them instead
         self.swarm = coming >= 3
-        if target is not None:
-            tf = target.hp / max(1.0, target.max_hp)
-            if hp_frac < 0.35 and tf > hp_frac + 0.1:
-                losing = True
-            if tf < 0.25 and hp_frac > 0.20 and near <= 2:
-                losing = False
-        red = False
+        n_eng = len(self.engaged)
+        recent = sum(h[4] or 0.0 for h in mem.hits if t - h[0] < 3.0 and h[3] != "zone")
+        dmg_rate = recent / 3.0
+        ttd = hp / max(dmg_rate, 1.0)
+        under_fire = any(t - h[0] < 2.0 and h[3] != "zone" for h in mem.hits)
+        known = target is not None and target.id in engaged_ids
+        # duel advantage: how long we last against how long it lasts
+        adv = 10.0
+        if known:
+            d = self.dist.get(target.id, 1e9)
+            mine = self.my_dps(me, d)
+            theirs = max(dmg_rate, self.their_dps(target, d))
+            adv = (hp / theirs) / max(target.hp / mine, 0.1)
         c = 0.0
         if heat is not None:
             K = self.wm.nidx(me["pos"][0], me["pos"][1])
             c = heat.route_cost(K) if K >= 0 else 0.0
-            red = c >= RED_COST or (c >= RED_COST_HURT and hp_frac < RED_HURT_HP)
             self.here_cost = heat.route_cost(K, target.id if target is not None else None) if K >= 0 else 0.0
-        if (losing or red) and not late:
-            self.lose_at = t
-            self.why = "outnumbered" if losing else "red"
-        self.retreat = t - self.lose_at < RETREAT_HOLD_S
+        danger = n_eng > 0 or under_fire
+        if self.retreat:
+            healed = hp_frac >= RETURN_HP
+            winnable = adv > 0.95
+            tgt_seen = known and self.los.get(target.id, False)
+            if healed and (not danger or winnable):
+                self.retreat = False
+            elif not danger and hp_frac >= RETURN_HP - 0.1:
+                self.retreat = False
+            elif winnable and hp_frac > 0.3 and n_eng <= 1 and known:
+                self.retreat = False
+            elif (tgt_seen and self.dist.get(target.id, 1e9) < 45.0 and t - self.lose_at > 2.0
+                  and n_eng <= 1 and adv > 0.35):
+                self.retreat = False          # cornered by one pursuer: turn and shoot back
+                self.cornered_at = t
+        elif danger and not late and t - self.cornered_at > 4.0:
+            if n_eng <= 1 and known:
+                leave = adv < DUEL_DISENGAGE and self.dist.get(target.id, 1e9) > 30.0 and ttd < 25.0
+                self.why = "duel"
+            elif n_eng >= 2:
+                leave = (ttd < LEAVE_TTD and hp_frac < 0.8) or (hp_frac < RETREAT_HP and ttd < 2 * LEAVE_TTD)
+                self.why = "ttd"
+            else:
+                leave = under_fire and (ttd < 1.5 * LEAVE_TTD or hp_frac < 0.6)
+                self.why = "unseen"
+            if leave:
+                self.retreat = True
+                self.lose_at = t
+        # never walk away from a kill one burst from done
+        if (target is not None and self.los.get(target.id, False) and 0 < target.hp
+                < self.my_dps(me, self.dist.get(target.id, 1e9)) * 1.2 + 40.0 and hp_frac > 0.12):
+            self.retreat = False
+        if late:
+            self.retreat = False
         self.pressed = self.retreat or c >= RED_COST_HURT
 
     def loot_ok(self, heat, x, y):
@@ -319,7 +422,8 @@ class Judge:
         s.gun_ok = False
         if gun is not None:
             gst = gun.get("stats") or {}
-            s.gun_yaw, s.gun_pitch = self._lead(muzzle, tp, tv, float(gst.get("speed", 252.0)), abs(tv[2]) < 0.5)
+            lv = (tv[0] * GUN_LEAD, tv[1] * GUN_LEAD, tv[2] * GUN_LEAD) if tr is not None else tv
+            s.gun_yaw, s.gun_pitch = self._lead(muzzle, tp, lv, float(gst.get("speed", 252.0)), abs(tv[2]) < 0.5)
             s.gun_ok = dist <= float(gst.get("range", 180.0)) * 0.96
         lat = AIM_LATENCY + self.tick_s
         dp = (tp[0] + tv[0] * lat, tp[1] + tv[1] * lat, tp[2])

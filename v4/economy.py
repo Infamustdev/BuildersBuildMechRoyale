@@ -30,7 +30,7 @@ UPGRADE_ORDER = (
 )
 RANK = {"laser": 4, "lightning": 3, "mortar": 1}
 LOOT_R = 150.0
-LASER_SEEK = 240.0
+LASER_SEEK = 250.0
 FIGHT_LOOT = 70.0
 FARM_HP = 0.50
 
@@ -125,7 +125,7 @@ class Economy:
             if self.bad.get(iid, -1.0) > t:
                 return
             d = math.hypot(pos[0] - x, pos[1] - y)
-            if d > 260.0 or math.hypot(pos[0] - cx, pos[1] - cy) > cr - 6.0:
+            if d > (300.0 if kind == "drop" else 260.0) or math.hypot(pos[0] - cx, pos[1] - cy) > cr - 6.0:
                 return
             if pos[2] - wm.ground_at(pos[0], pos[1]) > 3.2:
                 return
@@ -150,9 +150,21 @@ class Economy:
             seek = pk["kind"] == "laser"
             rad = LASER_SEEK if seek else LOOT_R
             if self.want_pickup(me, pk["kind"]) and math.hypot(pk["pos"][0] - x, pk["pos"][1] - y) < rad:
-                v = 130.0 if slot1_empty else 60.0
-                consider("pickup", iid, pk["pos"], max(v, 150.0) if seek else v)
+                # weapon values in the ratio laser 6.0 : lightning 2.6 : gun 2.0
+                v = {"laser": 6.0, "lightning": 2.6}.get(pk["kind"], 2.0) * (50.0 if slot1_empty else 30.0)
+                consider("pickup", iid, pk["pos"], v)
         cube_v = 25.0 if int(me.get("cubes", 0)) >= self.cube_cap else 75.0
+        # supply drops: full repair + 3 cubes; go if we can be there about when it lands
+        for dr in ctx.obs.get("drops") or ():
+            holder = dr.get("holder")
+            if holder is not None and holder != me.get("id"):
+                continue
+            dpos = dr["pos"]
+            dd = math.hypot(dpos[0] - x, dpos[1] - y)
+            if float(dr.get("lands_in", 0.0)) > dd / 9.0 * 1.3 + 6.0 and dr["id"] != self.loot_id:
+                continue
+            v = 200.0 * (1.5 if hp_frac < 0.6 else 1.0)
+            consider("drop", dr["id"], (dpos[0], dpos[1], wm.ground_at(dpos[0], dpos[1])), v)
         for iid, c in mem.cubes.items():
             if math.hypot(c["pos"][0] - x, c["pos"][1] - y) < max(60.0, LOOT_R * 0.7):
                 consider("cube", iid, c["pos"], cube_v)

@@ -46,6 +46,7 @@ UNSTICK_S = 0.5
 COOL_MAX_M = 60.0      # a cool cell further than this along the route is not worth running for
 SWARM_MAX_M = 90.0     # ...unless 3+ are coming at us
 CHASE_STAND_M = 30.0   # an engaged mech this close and not backing off: fight, do not run
+KITE_MIN, KITE_MAX = 130.0, 190.0
 LIGHT_RESERVE = 35.0   # with lightning, only boost-retreat above this much energy
 COOL_EVERY_S = 0.4
 COOL_COST = 2.0        # cool: no enemy but our target sees it (route cost ignoring the target)...
@@ -295,6 +296,20 @@ class Legs:
         # (rear hits x1.5), so we stand and fight it instead (unless 3+ are coming).
         chaser = any(j.dist.get(i, 1e9) < CHASE_STAND_M and j.closing.get(i, 0.0) > -1.0
                      for i in (e.id for e in j.engaged))
+        # Range kite (2+ on us, we hold a laser, not brawling with lightning): hold 130-190 m from
+        # the nearest engaged mech while the torso keeps shooting.
+        if not j.retreat and j.weapon(me, "laser")[0] is not None and not finishing:
+            vis = [e for e in j.engaged if j.los.get(e.id, False)]
+            if len(vis) >= 2:
+                nr = min(vis, key=lambda e: j.dist.get(e.id, 1e9))
+                nd = j.dist.get(nr.id, 1e9)
+                if nd < KITE_MIN:
+                    ux, uy = unit(px - nr.pos[0], py - nr.pos[1])
+                    gx, gy = nr.pos[0] + ux * (KITE_MIN + KITE_MAX) / 2, nr.pos[1] + uy * (KITE_MIN + KITE_MAX) / 2
+                    self.mode = "kite:range"
+                    self.goal = None
+                    mv = self._route(ctx, px, py, gx, gy, "kite")
+                    return mv, nd < 70.0 and energy > 45.0 and bool(mv[0] or mv[1])
         if j.retreat and (not chaser or j.swarm):
             if self.cool is None or t - self.cool_t > COOL_EVERY_S:
                 self.cool, self.cool_t = self._cool_cell(ctx, px, py), t
@@ -304,12 +319,27 @@ class Legs:
                 # keep energy for lightning shots: boosting drains what the arc needs
                 reserve = LIGHT_RESERVE if j.weapon(me, "lightning")[0] is not None else 10.0
                 return mv, energy > reserve and bool(mv[0] or mv[1])
-            # nowhere cool within reach: stand and fight, since running in the open shows our back
+            # nowhere cool within reach: run 30 m straight away from whoever is hurting us,
+            # boosting above 30 energy
+            src = j.target or j.foe
+            if src is not None:
+                ux, uy = unit(px - src.pos[0], py - src.pos[1])
+                gx, gy = px + ux * 30.0, py + uy * 30.0
+                if self.wm.walk_clear(px, py, gx, gy):
+                    self.mode = "retreat:run"
+                    mv = self._route(ctx, px, py, gx, gy, "flee")
+                    return mv, energy > 30.0 and bool(mv[0] or mv[1])
         else:
             self.cool = None
 
         foe = j.foe
         if foe is not None:
+            # a wanted weapon within 32 m decides the fight: grab it first
+            for iid, pk in ctx.mem.pickups.items():
+                if (ctx.economy.want_pickup(me, pk["kind"]) and pk["kind"] in ("laser", "lightning")
+                        and math.hypot(pk["pos"][0] - px, pk["pos"][1] - py) < 32.0):
+                    self.mode = "fight:arm"
+                    return self._route(ctx, px, py, pk["pos"][0], pk["pos"][1], "pickup"), False
             scoop = ctx.economy.scoop
             if scoop is not None:
                 self.mode = "fight:cube"
@@ -357,7 +387,11 @@ class Legs:
                     mv, _ = self.fight.decide(ctx, tr)
                     return mv, False
             self._commit(self.mode, pos[0], pos[1], kind, None, iid, t)
-            return self._route(ctx, px, py, pos[0], pos[1], kind), False
+            mv = self._route(ctx, px, py, pos[0], pos[1], kind)
+            # sprint for a laser while energy allows
+            pk = ctx.mem.pickups.get(iid) if kind == "pickup" else None
+            sprint = pk is not None and pk["kind"] == "laser" and energy > 30.0 and bool(mv[0] or mv[1])
+            return mv, sprint
 
         h = ctx.hunt
         self.hunt_pref = None

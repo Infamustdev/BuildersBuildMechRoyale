@@ -20,6 +20,9 @@ RING_MIN, RING_MAX = 3.0, 9.0
 GUN_R, LASER_R, LIGHT_R, FINISH_R = 85.0, 120.0, 28.0, 20.0
 
 
+REAR_AVOID_W = 35.0
+
+
 def unit(dx, dy):
     d = math.hypot(dx, dy)
     return (dx / d, dy / d) if d > 1e-6 else (0.0, 0.0)
@@ -166,6 +169,11 @@ class Fight:
                 if eid != foe.id:
                     s -= 30.0 if eid in fresh else 15.0
             s -= 8.0 * min(heat.likely(K), 3.0)
+            # rear arc: facing the foe from here, other attackers behind us hit for x1.5
+            fx, fy = foe.pos[0] - cx, foe.pos[1] - cy
+            for oe in ctx.judge.engaged:
+                if oe.id != foe.id and (oe.pos[0] - cx) * fx + (oe.pos[1] - cy) * fy < 0.0:
+                    s -= REAR_AVOID_W
             for lf in light_foes:
                 ed = math.hypot(lf.pos[0] - cx, lf.pos[1] - cy)
                 if ed < self.light_range + 16.0:
