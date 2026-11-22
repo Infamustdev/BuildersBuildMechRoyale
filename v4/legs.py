@@ -29,6 +29,8 @@ whatever move was chosen (not during escape or unstick).
 import heapq
 import math
 
+from roof import Roofs
+
 
 def unit(dx, dy):
     d = math.hypot(dx, dy)
@@ -58,6 +60,7 @@ HUNT_ARRIVE_M = 15.0   # reaching a hunt spot this close bans it, so we move on
 class Legs:
     def __init__(self, wm, rng, fight, evade, cfg):
         self.wm = wm
+        self.roof = Roofs(wm)
         self.fight = fight
         self.evade = evade
         self.rng = rng
@@ -234,6 +237,12 @@ class Legs:
             self.mode = "unstick"
             return self.unstick_dir, False, False
         energy = float(me.get("energy", 0.0))
+        # roof play: retreat up onto a roof and heal out of sight behind its edge
+        rs = self.roof.step(ctx, lambda gx, gy: self._route(ctx, px, py, gx, gy, "roof"))
+        if rs is not None:
+            self.mode = self.roof.mode
+            self.hist = []
+            return rs
         sh = self.evade.shell(ctx)
         if sh is not None:
             self.mode = "shell"
