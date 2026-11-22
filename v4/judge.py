@@ -9,7 +9,8 @@ the endgame (next zone radius <= 70 m or 3 mechs left), or - when we are above 6
 we have a shot line to inside 95 m (120 m with a laser), if we hold a laser or it has under 75%
 of our HP, so we take the fights we should win early.
 Retreat (held 1.5 s after it clears, never in the endgame):
-  outnumbered - 2+ mechs in sight within 160 m and HP < 55%, or 3+ and HP < 80%, or 2+ coming
+  outnumbered - (counting only mechs within 160 m that are engaged, closing in or inside 80 m)
+                2+ such mechs and HP < 55%, or 3+ and HP < 80%, or 2+ coming
                 at us (closing > 1 m/s or inside 40 m) and HP < 80%, or 3+ coming at any HP;
                 never when every nearby mech is moving away (we chase those); or HP < 35%
                 against a target 10 points healthier; cancelled when the target is under 25%,
@@ -19,6 +20,8 @@ Retreat (held 1.5 s after it clears, never in the endgame):
 Pressed: retreating, or our own cell's route cost >= 6. The economy then only takes
 loot that sits in a cooler cell than ours, and the escape route prefers cool cells with a cube.
 While retreating the HP weight in the target score rises to 0.6, so we keep shooting the weakest.
+Target override (only in this case): holding lightning with energy and our target out of its
+range, switch to the weakest candidate inside it.
 Target: lowest `distance + 0.18 hp - 200 (hp <= 30%) - 200 (same target within 2 s) - 40 (hit us
 in 4 s) - 15 (closing)` among engaged mechs we have a shot line to, within 200 m.
 """
@@ -129,7 +132,11 @@ class Judge:
         hp_frac = me["hp"] / max(1.0, me["max_hp"])
         hp_w = RETREAT_HP_W if self.retreat else HP_W
         self.engaged, self.los, self.dist, self.closing = [], {}, {}, {}
+        _, light = self.weapon(me, "lightning")
+        light_r = float((light.get("stats") or {}).get("range", 45.0)) if light else 0.0
+        light_ok = light is not None and float(me.get("energy", 0.0)) >= float((light.get("stats") or {}).get("energy", 3.0)) * 2
         target, foe, best = None, None, 1e18
+        cands = []
         danger = False
         for tr in mem.recent_mechs(2.5):
             dx, dy = tr.pos[0] - x, tr.pos[1] - y
@@ -181,8 +188,12 @@ class Judge:
                 s -= 40.0
             if closing > 3.0:
                 s -= 15.0
+            cands.append((tr, d))
             if s < best:
                 best, target = s, tr
+        # Narrow overrides on top of the usual pick; they only fire in the two situations seed 10
+        # showed, so ordinary fights keep choosing exactly as before.
+        target = self._override(target, cands, light_ok, light_r)
         if target is not None:
             self.stick_id, self.stick_at = target.id, t
         if danger or any(t - h[0] < 3.0 and h[3] != "zone" for h in mem.hits):
@@ -198,9 +209,26 @@ class Judge:
         else:
             self._farm(mem, me, muzzle, loot_goal, x, y)
 
+    def _override(self, target, cands, light_ok, light_r):
+        """Lightning idle: we hold lightning with energy, our target is outside its range, and
+        another candidate is inside it -> shoot the weakest one in range. (A "shoot whoever just
+        hit us hard" switch was tried too and lowered the 16-seed average.)"""
+        if not cands:
+            return target
+        if light_ok and target is not None and self.dist.get(target.id, 1e9) >= light_r - 2.0:
+            close = [c for c in cands if c[1] < light_r - 2.0]
+            if close:
+                return min(close, key=lambda c: c[0].hp)[0]
+        return target
+
     def _retreat(self, mem, me, hp_frac, late, target, heat):
         t = mem.t
-        near_ids = [e.id for e in mem.recent_mechs(0.01) if self.dist.get(e.id, 1e9) < 160.0]
+        # a mech counts toward "outnumbered" only if it is part of this fight: engaged with us,
+        # coming at us, or inside 80 m (a bystander 150 m away does not make a duel a 2-on-1)
+        engaged_ids = {e.id for e in self.engaged}
+        near_ids = [e.id for e in mem.recent_mechs(0.01) if self.dist.get(e.id, 1e9) < 160.0
+                    and (e.id in engaged_ids or self.dist.get(e.id, 1e9) < 80.0
+                         or self.closing.get(e.id, 0.0) > 1.0)]
         near = len(near_ids)
         # who is coming for us: closing in, or already inside 40 m
         coming = sum(1 for i in near_ids if self.closing.get(i, 0.0) > 1.0 or self.dist.get(i, 1e9) < 40.0)

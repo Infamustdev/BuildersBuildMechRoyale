@@ -45,6 +45,8 @@ STUCK_M = 1.2
 UNSTICK_S = 0.5
 COOL_MAX_M = 60.0      # a cool cell further than this along the route is not worth running for
 SWARM_MAX_M = 90.0     # ...unless 3+ are coming at us
+CHASE_STAND_M = 30.0   # an engaged mech this close and not backing off: fight, do not run
+LIGHT_RESERVE = 35.0   # with lightning, only boost-retreat above this much energy
 COOL_EVERY_S = 0.4
 COOL_COST = 2.0        # cool: no enemy but our target sees it (route cost ignoring the target)...
 COOL_DROP = 3.0        # ...or at least this much cooler than where we stand
@@ -289,13 +291,19 @@ class Legs:
             self.goal = None
             return kite
 
-        if j.retreat:
+        # A mech coming at us inside 30 m will run us down: turning away only shows it our back
+        # (rear hits x1.5), so we stand and fight it instead (unless 3+ are coming).
+        chaser = any(j.dist.get(i, 1e9) < CHASE_STAND_M and j.closing.get(i, 0.0) > -1.0
+                     for i in (e.id for e in j.engaged))
+        if j.retreat and (not chaser or j.swarm):
             if self.cool is None or t - self.cool_t > COOL_EVERY_S:
                 self.cool, self.cool_t = self._cool_cell(ctx, px, py), t
             if self.cool is not None:
                 self.mode = "retreat:" + j.why
                 mv = self._route(ctx, px, py, self.cool[0], self.cool[1], "cool")
-                return mv, energy > 10.0 and bool(mv[0] or mv[1])
+                # keep energy for lightning shots: boosting drains what the arc needs
+                reserve = LIGHT_RESERVE if j.weapon(me, "lightning")[0] is not None else 10.0
+                return mv, energy > reserve and bool(mv[0] or mv[1])
             # nowhere cool within reach: stand and fight, since running in the open shows our back
         else:
             self.cool = None

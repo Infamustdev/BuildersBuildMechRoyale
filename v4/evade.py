@@ -1,7 +1,8 @@
 """Evasion moves the legs take ahead of (or blend into) everything else.
 
-- escape : trapped in a walled pocket off the main walkable area -> walk to a launch cell, wait
-           for 70% energy, jump and jet over the wall to the landing cell
+- escape : trapped in a walled pocket off the main walkable area -> walk the route to a launch
+           cell, wait for 70% energy, jump and jet over the wall to the landing cell; still in the
+           pocket after 12 s -> give up for 30 s and let normal movement drive
 - shell  : a mortar shell will land within splash + our radius + 2 m in under 2.5 s -> step away
            (first walkable heading of 0, +-0.7, +-1.4 rad off "straight away")
 - kite   : no lightning of our own and a lightning carrier inside its range + 6 m -> score seven
@@ -14,6 +15,9 @@
 """
 import math
 from collections import deque
+
+ESC_GIVE_UP_S = 12.0      # still in the pocket after this long: stop trying...
+ESC_BAN_S = 30.0          # ...for this long
 
 from memory import angdiff
 
@@ -32,6 +36,9 @@ class Evade:
         self.esc = None           # (launch (x, y), land (x, y)) while escaping
         self.esc_t = -1e9
         self.flying = False
+        self.esc_path = []
+        self.esc_since = None     # when we first found ourselves in this pocket
+        self.esc_ban_until = -1e9
 
     # ------------------------------------------------------------ walkable components
     def _components(self):
@@ -97,20 +104,37 @@ class Evade:
         wm, me, t = self.wm, ctx.me, ctx.t
         x, y, z = me["pos"]
         energy, max_e = float(me.get("energy", 0.0)), float(me.get("max_energy", 100.0))
+        if t < self.esc_ban_until:
+            return None
         if me.get("grounded", True):
             self.flying = False
             K = wm.nidx(x, y)
             if K < 0 or wm.nblock[K] or z - wm.nground[K] > 3.0 or self.comp[K] == self.main or self.comp[K] < 0:
                 self.esc = None
+                self.esc_since = None
+                return None
+            if self.esc_since is None:
+                self.esc_since = t
+            elif t - self.esc_since > ESC_GIVE_UP_S:
+                # still in the pocket: it is probably not a pocket (our grid misses a ramp) or
+                # the jump keeps failing. Let normal movement have the legs for a while.
+                self.esc, self.esc_since = None, None
+                self.esc_ban_until = t + ESC_BAN_S
                 return None
             if self.esc is None or t - self.esc_t > 6.0:
                 self.esc, self.esc_t = self._plan_escape(x, y), t
                 if self.esc is None:
                     return None
+                lx, ly = self.esc[0]
+                self.esc_path = wm.path(x, y, lx, ly, budget_nodes=1800)
             (lx, ly), _ = self.esc
             if math.hypot(lx - x, ly - y) > 3.0:
-                d = math.hypot(lx - x, ly - y)
-                return ((lx - x) / d, (ly - y) / d), False, False
+                # walk the route to the launch cell, not a straight line into a wall
+                while len(self.esc_path) > 1 and math.hypot(self.esc_path[0][0] - x, self.esc_path[0][1] - y) < 3.0:
+                    self.esc_path.pop(0)
+                wx, wy = self.esc_path[0] if self.esc_path else (lx, ly)
+                d = math.hypot(wx - x, wy - y) or 1.0
+                return ((wx - x) / d, (wy - y) / d), False, False
             if energy < min(70.0, max_e * 0.7):
                 return (0.0, 0.0), False, False
             self.flying = True
