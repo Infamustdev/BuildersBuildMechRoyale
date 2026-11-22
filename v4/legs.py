@@ -16,7 +16,9 @@ Priority each tick (evade.py holds the evasion moves):
   5. the economy's loot goal: walk to items; a crate in sight within 50 m is shot from where we
      stand (backing off inside 12 m); a drone in sight within 75 m is fought like a mech
   6. hunt: the shared hunt goal (recent enemy cell, else likely-enemy hotspot)
-  7. hold the zone goal (stay put unless outside next_radius - margin)
+  7. explore: walk to the ground we have gone longest without seeing (heat.explore_goal), so
+     items and enemies we cannot see from here turn up; above 50% HP
+  8. hold the zone goal (stay put unless outside next_radius - margin)
 Every route is A* on the nav grid with heat.route_cost added per step, so it bends around cells
 enemies can see, likely-enemy heat and where we were watched. Hunt goals that make no progress
 are banned. Incoming rounds and laser aim on us are sidestepped by blending a dodge into
@@ -63,6 +65,7 @@ class Legs:
         self.unstick_dir = (0.0, 0.0)
         self.mode = "hold"
         self.cool, self.cool_t = None, -1e9
+        self.explore = None
 
     # ------------------------------------------------------------ helpers
     def banned(self, x, y, t):
@@ -277,6 +280,17 @@ class Legs:
                 return self._route(ctx, px, py, h[0], h[1], "hunt:" + h[2]), False
             self.bans.append((h[0], h[1], t + BAN_S))
 
+        if me["hp"] >= 0.5 * me["max_hp"]:
+            g = self.explore
+            if g is None or math.hypot(g[0] - px, g[1] - py) < 12.0 or self.banned(g[0], g[1], t):
+                g = self.explore = ctx.heat.explore_goal(px, py, z, lambda x, y: self.banned(x, y, t))
+            if g is not None:
+                d = math.hypot(g[0] - px, g[1] - py)
+                if self._progress_ok(("explore", round(g[0]), round(g[1])), d, t):
+                    self.mode = "explore"
+                    return self._route(ctx, px, py, g[0], g[1], "explore"), False
+                self.bans.append((g[0], g[1], t + BAN_S))
+                self.explore = None
+
         self.mode = "hold"
-        self.cool, self.cool_t = None, -1e9
         return self._route(ctx, px, py, zgx, zgy, "hold"), False

@@ -26,6 +26,11 @@ SAMPLE_BUDGET = 12000  # ray samples per tick (~5 ms; one full viewshed is ~30k)
 LIKELY_TAU = 6.0
 EXPO_TAU = 20.0
 HUNT_CELL = 64.0
+HEARD_MIN = 0.15      # likely-enemy heat a heard hotspot needs before we hunt it
+SEEN_CELL = 32.0      # explore grid
+SEEN_NEAR = 45.0      # all-round sight
+SEEN_FAR = 110.0      # cone sight we credit (crowns thin it out beyond this)
+SEEN_EVERY = 0.5
 SOUND_W = {"gun": 1.0, "laser": 1.2, "laser_charge": 1.6, "lightning": 1.0, "mortar": 1.0,
            "explosion": 0.25, "step": 1.6, "boost": 1.2, "jet": 1.0, "reload": 0.8,
            "death": 0.2, "crate": 0.6, "npc_gun": 0.1, "drop": 0.0}
@@ -61,6 +66,8 @@ class Heat:
         self.likely_map = {}          # K -> (value, t)
         self.expo_map = {}            # K -> (value, t)
         self.enemy_cells = {}         # (i, j) -> (t, x, y)
+        self.seen_at = {}             # (i, j) on the 32 m explore grid -> last time it was in view
+        self._seen_t = -1e9
         self.work = 0
         self._blob = {}
 
@@ -74,6 +81,9 @@ class Heat:
         self._viewsheds(mem, px, py)
         self._likely(mem, px, py)
         self._exposure(mem, px, py)
+        if t - self._seen_t >= SEEN_EVERY:
+            self._seen_t = t
+            self._mark_seen(me)
         for tr in mem.enemies():
             c = (int((tr.pos[0] - self.wm.x0) // HUNT_CELL), int((tr.pos[1] - self.wm.y0) // HUNT_CELL))
             self.enemy_cells[c] = (t, tr.pos[0], tr.pos[1])
@@ -302,6 +312,56 @@ class Heat:
                     best, bv = (cx, cy, v), v
         return best
 
+    def _mark_seen(self, me):
+        """Credit explore cells we can see now: everything within 45 m, plus cells in the 120 deg
+        view cone out to 110 m whose centre has a clear sight line (crowns count)."""
+        wm = self.wm
+        x, y, z = me["pos"]
+        eye = (x, y, z + EYE)
+        yaw = me["aim"][0]
+        C = SEEN_CELL
+        i0, j0 = int((x - wm.x0) // C), int((y - wm.y0) // C)
+        r = int(SEEN_FAR // C) + 1
+        for i in range(i0 - r, i0 + r + 1):
+            for j in range(j0 - r, j0 + r + 1):
+                cx, cy = wm.x0 + (i + 0.5) * C, wm.y0 + (j + 0.5) * C
+                d = math.hypot(cx - x, cy - y)
+                if d <= SEEN_NEAR:
+                    self.seen_at[(i, j)] = self.t
+                elif d <= SEEN_FAR and abs(angdiff(math.atan2(cy - y, cx - x), yaw)) < math.radians(60):
+                    if wm.los(eye, (cx, cy, wm.ground_at(cx, cy) + 2.0)):
+                        self.seen_at[(i, j)] = self.t
+
+    def explore_goal(self, x, y, zone, banned):
+        """Ground we have gone longest without seeing: lowest distance - 0.15 x age (age capped
+        at 120 s, never seen = 120) + 0.15 x distance from the next zone centre, inside the zone,
+        on a walkable cell. (x, y) or None."""
+        wm = self.wm
+        C = SEEN_CELL
+        zx, zy = zone["center"]
+        zr = zone["radius"] - 20.0
+        nx, ny = zone["next_center"]
+        best, bs = None, 1e18
+        i0, j0 = int((zx - zr - wm.x0) // C), int((zy - zr - wm.y0) // C)
+        n = int(2 * zr // C) + 2
+        for i in range(i0, i0 + n):
+            for j in range(j0, j0 + n):
+                cx, cy = wm.x0 + (i + 0.5) * C, wm.y0 + (j + 0.5) * C
+                if math.hypot(cx - zx, cy - zy) > zr:
+                    continue
+                age = min(120.0, self.t - self.seen_at.get((i, j), -1e9))
+                if age < 20.0:
+                    continue
+                d = math.hypot(cx - x, cy - y)
+                s = d - 0.15 * age + 0.15 * math.hypot(cx - nx, cy - ny)
+                if s >= bs or banned(cx, cy):
+                    continue
+                K = wm.nearest_open(cx, cy, 4)
+                if K < 0:
+                    continue
+                bs, best = s, wm.ncenter(K)
+        return best
+
     def hunt_goal(self, x, y, zone, max_age=45.0):
         """Where to go looking for the next fight: the best recent enemy cell (distance + 3 m per
         second of age, 40-300 m away, inside the zone), else the likely-enemy hotspot within
@@ -317,7 +377,7 @@ class Heat:
             if s < bs:
                 bs, best = s, (cx, cy, "seen")
         if best is None:
-            h = self.hotspot(x, y, 200.0)
+            h = self.hotspot(x, y, 200.0, HEARD_MIN)
             if h is not None and math.hypot(h[0] - x, h[1] - y) > 25.0:
                 best = (h[0], h[1], "heard")
         return best

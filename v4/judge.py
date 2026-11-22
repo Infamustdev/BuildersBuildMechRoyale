@@ -12,7 +12,7 @@ Retreat (held 1.5 s after it clears, never in the endgame):
                 we are above 20% and at most two are near (finish it instead)
   red         - the heat route cost of our own cell is red: >= 8 (about three enemies watching,
                 or two plus likely-enemy heat), or >= 6 once HP is under 80%
-Pressed: retreating, or our own cell's route cost >= 6 (amber/red). The economy then only takes
+Pressed: retreating, or our own cell's route cost >= 6. The economy then only takes
 loot that sits in a cooler cell than ours, and the escape route prefers cool cells with a cube.
 While retreating the HP weight in the target score rises to 0.6, so we keep shooting the weakest.
 Target: lowest `distance + 0.18 hp - 200 (hp <= 30%) - 200 (same target within 2 s) - 40 (hit us
