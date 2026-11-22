@@ -136,7 +136,9 @@ class Combat:
         s.d = math.dist(o, p)
         c = self.target_center(tpos, cubes, kind)
         top = (c[0], c[1], c[2] + half_h * 0.8)
-        s.los = self.wm.los(o, c) or self.wm.los(o, top)
+        # Shots fly through tree crowns; only buildings and terrain stop them. Using the sight
+        # check here (which counts canopy) held our fire for 24% of all time with a target.
+        s.los = self.wm.los(o, c, canopy=False) or self.wm.los(o, top, canopy=False)
         ey, ep = self.aim_error(me, s.yaw, s.pitch)
         # lateral speed of the target relative to our line of fire
         bx, by = (p[0] - o[0]), (p[1] - o[1])
@@ -160,7 +162,7 @@ class Combat:
         lt = W.get("lightning", {})
         if s.los and s.d <= lt.get("range", 45.0) * 0.95:
             off = abs(angdiff(s.yaw, me["aim"][0]))
-            s.p_light = 1.0 if off < math.radians(lt.get("cone_deg", 30.0)) * 0.4 else 0.0
+            s.p_light = 1.0 if off < math.radians(lt.get("cone_deg", 30.0)) * 0.5 - 0.05 else 0.0
         s.mortar_aim = self.mortar_solution(me, tpos, tvel, cubes, kind)
         if s.mortar_aim is not None:
             yaw, pitch, T, clear = s.mortar_aim
@@ -276,9 +278,12 @@ class Combat:
         return dps * self.mult(me.get("cubes", 0))
 
     # ------------------------------------------------------------ triggers
-    def triggers(self, me, s, mode, t, events=()):
+    def triggers(self, me, s, mode, t, events=(), thp=None):
         """Decide aim and fire for a target described by Shot `s`.
-        mode: 'fight' | 'finish' | 'third' | 'crate' | 'npc'.  Returns (aim, fire[2], reload)."""
+        mode: 'fight' | 'finish' | 'third' | 'crate' | 'npc'.  Returns (aim, fire[2], reload).
+        thp: the target mech's HP, for releasing a laser charge early once it is lethal.
+
+        Trigger discipline: once in a fight, every weapon fires whenever it physically can."""
         for e in events:
             if e.get("type") == "effect" and e.get("effect") == "short":
                 self.short_until = t + self.W.get("lightning", {}).get("short_s", 2.0)
@@ -313,7 +318,20 @@ class Combat:
             if charge > 0:
                 if s.los and s.in_laser_range:
                     self.laser_lost_since = None
-                    if charge >= full * SHOOT["laser_release_charge"]:
+                    lst = w.get("stats", {})
+                    min_ch = lst.get("min_charge", 0.3)
+                    lethal = False
+                    if (thp is not None and mode in ("fight", "finish", "third") and min_ch <= charge < full * SHOOT["laser_release_charge"]):
+                        # a partial charge that already kills: let it go now (laser_lethal_k)
+                        mf_ = lst.get("min_frac", 0.35)
+                        dmg = lst.get("damage", 315.0) * (mf_ + (1.0 - mf_) * charge / max(0.01, full)) * self.mult(me.get("cubes", 0))
+                        lethal = dmg * SHOOT["laser_lethal_k"] >= thp
+                    if lethal:
+                        aim = [s.laser_aim[0], s.laser_aim[1]]
+                        fire[i] = not s.laser_lined     # release once lined up, else keep holding
+                        if s.laser_lined:
+                            self.laser_full_since = None
+                    elif charge >= full * SHOOT["laser_release_charge"]:
                         # about to release: point at the hitscan lead, not the bullet lead
                         aim = [s.laser_aim[0], s.laser_aim[1]]
                         if self.laser_full_since is None:
@@ -335,14 +353,17 @@ class Combat:
                         self.laser_full_since = None
             else:
                 self.laser_full_since = None
-                if (w.get("cooldown", 0) <= 0 and t >= self.short_until and s.los and s.in_laser_range
+                # start charging as soon as there is a target in reach, seen or not: the charge
+                # is ready the moment it steps back into sight
+                if (w.get("cooldown", 0) <= 0 and t >= self.short_until and s.in_laser_range
+                        and (s.los or mode in ("fight", "finish", "third"))
                         and mode in ("fight", "finish", "third", "crate", "npc")):
                     fire[i] = True  # start charging
 
         if "lightning" in kinds:
             i, w = kinds["lightning"]
             if (w.get("cooldown", 0) <= 0 and s.p_light > 0 and
-                    me.get("energy", 0) > SHOOT["lightning_energy_reserve"] and mode != "crate"):
+                    me.get("energy", 0) >= w.get("stats", {}).get("energy", 3.0) and mode != "crate"):
                 fire[i] = True
 
         reload = False
@@ -352,11 +373,9 @@ class Combat:
             if w.get("reload", 0) > 0 or ammo <= 0:
                 reload = ammo <= 0 and w.get("reload", 0) <= 0
             else:
-                # Fire on expected value, not on "the crosshair crossed them". A miss costs a
-                # round, the reload that follows and a 320 m noise; the threshold is lower up
-                # close and against something we can finish, higher when the magazine is nearly
-                # out and a reload would take us out of the fight.
-                if mode in ("crate", "npc"):
+                # In a fight, fire whenever lined up. The hit-chance gate that used to
+                # sit here held back a third of our rounds, and a round not fired deals nothing.
+                if mode in ("crate", "npc", "fight", "finish", "third"):
                     # A crate does not dodge and does not shoot back. Gating it on hit
                     # probability starved the damage check that decides whether we are making
                     # progress, so we shelved crates we were standing in front of.

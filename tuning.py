@@ -61,7 +61,14 @@ MOVE = {
 
 # ---------------------------------------------------------------- judgement
 JUDGE = {
-    # Target selection: expected DPS x priority / torso-slew cost
+    # Engage rule. A mech is "engaged" if it hit us lately, or is in sight and close, closing
+    # fast, wounded or aiming at us.
+    "eng_hit_memory_s": 6.0,
+    "eng_close_m": 60.0,
+    "eng_closing_mps": 3.0,
+    "eng_wounded_frac": 0.4,
+    "eng_aimed_rad": 0.22,
+    # Target selection: expected DPS x priority / torso-slew cost, with a focus lock
     "killable_s": 3.0,              # finishable in this long -> the kill is the whole point
     "pri_killable": 4.0,
     "pri_charging": 1.5,            # our hit cancels a laser charge
@@ -98,12 +105,6 @@ JUDGE = {
 
 # ---------------------------------------------------------------- shooting
 SHOOT = {
-    # Anti-aggro: the squad shares vision, so opening fire on a distant, healthy bot that is
-    # not already fighting us simply recruits it. Shoot attackers, the wounded, and anything
-    # close; leave idle bystanders alone.
-    "poke_max_m": 95.0,
-    "poke_max_laser_m": 150.0,
-    "poke_wounded_frac": 0.85,
 
     # Fire the gun on expected value rather than on crossing the target.
     "p_fire": 0.22,                 # normal threshold on modelled hit chance
@@ -119,6 +120,7 @@ SHOOT = {
     "pred_noise": 0.5,              # fraction of possible target dodge we can't predict (judgement only)
     "target_accel": 58.5,           # ground accel of a mech (config.mech.ground_accel)
     "laser_release_charge": 0.97,   # release at this fraction of full charge
+    "laser_lethal_k": 0.70,         # release a partial charge once 70% of its damage covers the target's HP
     "laser_max_hold_lost": 1.6,     # s to keep a charge after losing the target (covers the step out of cover)
     "lightning_energy_reserve": 25.0,
     "mortar_min_dist": 22.0,        # self-splash is 50%; stay clear

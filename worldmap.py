@@ -238,7 +238,7 @@ class WorldMap:
         k = self.fidx(x, y)
         return k < 0 or self.solid[k] == 1
 
-    def los(self, a, b, step=1.5):
+    def los(self, a, b, step=1.5, canopy=True):
         """True if nothing static (terrain, buildings) blocks the segment a->b (3D points)."""
         ax, ay, az = a
         dx, dy, dz = b[0] - ax, b[1] - ay, b[2] - az
@@ -259,6 +259,8 @@ class WorldMap:
             # Canopy does not stop a shot, but it does stop sight: a line that spends long
             # enough inside crowns is blocked. Without this the danger map had enemies seeing
             # straight through woodland, so it priced cover as open ground.
+            if not canopy:
+                continue
             I = int((px - x0) * ninv)
             J = int((py - y0) * ninv)
             if 0 <= I < nnx and 0 <= J < nny and can[J * nnx + I]:
