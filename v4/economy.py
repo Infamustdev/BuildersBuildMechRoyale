@@ -21,6 +21,14 @@ import math
 
 from judge import Judge
 
+UPGRADE_RANK = {
+    "sensors": 0.98, "gyros": 0.95, "jets": 0.92, "mortar_splash": 0.90, "mortar_reload": 0.88,
+    "mortar_velocity": 0.85, "capacitor": 0.82, "reactor": 0.80, "laser_pierce": 0.78,
+    "lightning_chain": 0.75, "servos": 0.68, "nanites": 0.62, "gun_mag": 0.55,
+    "gun_velocity": 0.52, "laser_charge": 0.48, "gun_rate": 0.45, "gun_damage": 0.42,
+    "laser_damage": 0.40, "lightning_range": 0.38, "lightning_efficiency": 0.35,
+    "armor": 0.30, "plating": 0.28,
+}
 UPGRADE_ORDER = (
     "plating", "armor", "laser_damage", "laser_charge", "nanites",
     "gun_damage", "gun_rate", "lightning_efficiency", "lightning_range",
@@ -29,7 +37,11 @@ UPGRADE_ORDER = (
     "mortar_velocity", "sensors", "jets", "laser_pierce",
 )
 RANK = {"laser": 4, "lightning": 3, "mortar": 1}
-LOOT_R = 150.0
+WVAL = {"laser": 6.0, "lightning": 2.6, "gun": 2.0}
+GO_K = 6.8          # loot value scale: a cube (11) is worth 75 on our utility scale
+WALK_M = 7.2        # metres of walking per second of handling time
+WANT_CUBES = 26     # keep collecting cubes up to this many
+LOOT_R = 250.0
 LASER_SEEK = 250.0
 FIGHT_LOOT = 70.0
 FARM_HP = 0.50
@@ -64,9 +76,11 @@ class Economy:
         out = {}
         offer = ctx.obs.get("offer")
         if offer and offer.get("choices"):
-            ranks = [UPGRADE_ORDER.index(c.get("id")) if c.get("id") in UPGRADE_ORDER else 99
-                     for c in offer["choices"]]
-            out["pick"] = ranks.index(min(ranks))
+            has_light = Judge.weapon(me, "lightning")[0] is not None
+            vals = [UPGRADE_RANK.get(c.get("id"), 0.25)
+                    + (0.3 if has_light and c.get("id") in ("reactor", "capacitor") else 0.0)
+                    for c in offer["choices"]]
+            out["pick"] = vals.index(max(vals))
 
         ws = me.get("weapons") or []
         for pk in ctx.obs.get("pickups") or ():
@@ -96,21 +110,29 @@ class Economy:
         return out
 
     def _fight_scoop(self, ctx, x, y, zf, hp_frac):
-        r = FIGHT_LOOT * (0.57 if hp_frac <= 0.5 else 1.0)
+        """Cubes worth walking to mid-fight (they are health, damage and upgrades): a pile of 2+
+        within 7 m is worth 110 m, a single cube 40 m; nothing past 30 m below 30% HP; never into
+        a lightning carrier's arc; never into a red heat cell. Best = cubes / (distance + 12)."""
+        if int(ctx.me.get("cubes", 0)) >= WANT_CUBES + 6:
+            return
         no_light = Judge.weapon(ctx.me, "lightning")[0] is None
-        carriers = [e for e in ctx.mem.recent_mechs(0.01) if "lightning" in (e.weapons or ())] if no_light else []
-        for c in ctx.mem.cubes.values():
-            p = c["pos"]
+        carriers = [e for e in ctx.mem.recent_mechs(4.0) if "lightning" in (e.weapons or ())] if no_light else []
+        cubes = [c["pos"] for c in ctx.mem.cubes.values()]
+        bv = 0.0
+        for p in cubes:
             if abs(p[2] - zf) > 3.6:
                 continue
             d = math.hypot(p[0] - x, p[1] - y)
-            if d >= r:
+            n = sum(1 for o in cubes if math.hypot(o[0] - p[0], o[1] - p[1]) < 7.0)
+            if d > (110.0 if n >= 2 else 40.0) or (d > 30.0 and hp_frac < 0.3):
                 continue
-            if any(math.hypot(e.pos[0] - p[0], e.pos[1] - p[1]) < self.light_range + 4.0 for e in carriers):
+            if any(math.hypot(e.pos[0] - p[0], e.pos[1] - p[1]) < self.light_range + 8.0 for e in carriers):
                 continue
             if not ctx.judge.loot_ok(ctx.heat, p[0], p[1]):
                 continue
-            r, self.scoop = d, p
+            v = n / (d + 12.0)
+            if v > bv:
+                bv, self.scoop = v, p
 
     def _choose(self, ctx, x, y, zf, hp_frac, danger):
         me, mem, t, wm, heat = ctx.me, ctx.mem, ctx.t, self.wm, ctx.heat
@@ -120,7 +142,9 @@ class Economy:
         hunt = ctx.hunt
         best, best_u = None, 0.0
 
-        def consider(kind, iid, pos, value):
+        mechs_now = list(mem.recent_mechs(2.0))
+
+        def consider(kind, iid, pos, value, handle_m=0.0):
             nonlocal best, best_u
             if self.bad.get(iid, -1.0) > t:
                 return
@@ -135,12 +159,14 @@ class Economy:
                 detour = d + math.hypot(hunt[0] - pos[0], hunt[1] - pos[1]) - math.hypot(hunt[0] - x, hunt[1] - y)
             else:
                 detour = d
-            u = value / (max(0.0, detour) + 18.0)
+            if kind != "cube" and any(math.hypot(e.pos[0] - pos[0], e.pos[1] - pos[1]) < 45.0 for e in mechs_now):
+                value *= 0.35                 # an enemy stands next to it
+            u = value / (max(0.0, detour) + 18.0 + handle_m)
             K = wm.nidx(pos[0], pos[1])
             if K >= 0:
                 u /= 1.0 + 0.5 * len(heat.seen_by.get(K, ()))
             if iid == self.loot_id:
-                u *= 1.35
+                u *= 1.25
             if u > best_u:
                 best_u, best = u, (kind, iid, pos)
 
@@ -150,10 +176,13 @@ class Economy:
             seek = pk["kind"] == "laser"
             rad = LASER_SEEK if seek else LOOT_R
             if self.want_pickup(me, pk["kind"]) and math.hypot(pk["pos"][0] - x, pk["pos"][1] - y) < rad:
-                # weapon values in the ratio laser 6.0 : lightning 2.6 : gun 2.0
-                v = {"laser": 6.0, "lightning": 2.6}.get(pk["kind"], 2.0) * (50.0 if slot1_empty else 30.0)
-                consider("pickup", iid, pk["pos"], v)
-        cube_v = 25.0 if int(me.get("cubes", 0)) >= self.cube_cap else 75.0
+                # weapon value x 4 (laser 6.0, lightning 2.6, gun 2.0), or the gain over what it replaces
+                v = WVAL.get(pk["kind"], 2.0)
+                if pk["kind"] != "gun" and not slot1_empty:
+                    v -= WVAL.get(ws[1].get("kind"), 0.0)
+                if v > 0:
+                    consider("pickup", iid, pk["pos"], v * 4 * GO_K, 0.5 * WALK_M)
+        cube_v = 11.0 * GO_K if int(me.get("cubes", 0)) < WANT_CUBES else 0.0
         # supply drops: full repair + 3 cubes; go if we can be there about when it lands
         for dr in ctx.obs.get("drops") or ():
             holder = dr.get("holder")
@@ -163,20 +192,22 @@ class Economy:
             dd = math.hypot(dpos[0] - x, dpos[1] - y)
             if float(dr.get("lands_in", 0.0)) > dd / 9.0 * 1.3 + 6.0 and dr["id"] != self.loot_id:
                 continue
-            v = 200.0 * (1.5 if hp_frac < 0.6 else 1.0)
-            consider("drop", dr["id"], (dpos[0], dpos[1], wm.ground_at(dpos[0], dpos[1])), v)
+            v = 30.0 * GO_K * (1.5 if hp_frac < 0.6 else 1.0)
+            consider("drop", dr["id"], (dpos[0], dpos[1], wm.ground_at(dpos[0], dpos[1])), v,
+                     (4.0 + float(dr.get("lands_in", 0.0)) * 0.3) * WALK_M)
         for iid, c in mem.cubes.items():
             if math.hypot(c["pos"][0] - x, c["pos"][1] - y) < max(60.0, LOOT_R * 0.7):
-                consider("cube", iid, c["pos"], cube_v)
+                if cube_v > 0:
+                    consider("cube", iid, c["pos"], cube_v)
         if hp_frac > FARM_HP and not danger:
             for iid, c in mem.crates.items():
                 if math.hypot(c["pos"][0] - x, c["pos"][1] - y) < LOOT_R:
-                    consider("crate", iid, c["pos"], cube_v * 0.6)
+                    consider("crate", iid, c["pos"], 7.0 * GO_K, 2.5 * WALK_M)
             mech_near = any(math.hypot(e.pos[0] - x, e.pos[1] - y) < 150.0 for e in mem.recent_mechs(10.0))
-            if int(me.get("cubes", 0)) < self.cube_cap and not mech_near:   # mechs before drones
+            if int(me.get("cubes", 0)) < WANT_CUBES and not mech_near:   # mechs before drones
                 for tr in mem.tracks.values():
                     if tr.kind == "npc" and t - tr.seen_t < 12.0 and math.hypot(tr.pos[0] - x, tr.pos[1] - y) < LOOT_R:
-                        consider("npc", tr.id, tr.pos, 85.0)
+                        consider("npc", tr.id, tr.pos, 11.0 * GO_K, 5.0 * WALK_M)
         if best is None:
             self.loot_id = None
             return None

@@ -40,23 +40,26 @@ class Triggers:
             def slew_ok(wy, wp):
                 ey = max(0.0, abs(angdiff(wy, my_aim[0])) - turn_r)
                 ep = max(0.0, abs(wp - my_aim[1]) - pitch_r)
-                return ey < sol.tol_y and ep < sol.tol_p
+                return ey < sol.gun_tol_y and ep < sol.gun_tol_p
 
-            hit_lined = (abs(angdiff(sol.hit_yaw, my_aim[0])) < sol.tol_y * 0.9
-                         and abs(sol.hit_pitch - my_aim[1]) < sol.tol_p)
+            hit_lined = (max(0.0, abs(angdiff(sol.hit_yaw, my_aim[0])) - turn_r) < sol.las_tol_y
+                         and max(0.0, abs(sol.hit_pitch - my_aim[1]) - pitch_r) < sol.las_tol_p)
             for i, w in enumerate(ws):
                 if not w:
                     continue
                 k = w.get("kind")
                 wst = w.get("stats") or {}
                 if k == "gun":
+                    if w.get("ammo", 0) <= 0 and w.get("reload", 0.0) <= 0.0:
+                        reload = True            # empty: reload now, even mid-fight
                     if (sol.gun_ok and w.get("ammo", 0) > 0 and w.get("reload", 0.0) <= 0.0
                             and slew_ok(sol.gun_yaw, sol.gun_pitch)):
                         fire[i] = True
                 elif k == "lightning":
-                    cone = math.radians(float(wst.get("cone_deg", 25.0)))
-                    if (sol.dist < float(wst.get("range", 45.0)) - 1.5
-                            and abs(angdiff(sol.hit_yaw, my_aim[0])) < cone * 0.5 - 0.05
+                    cone = math.radians(float(wst.get("cone_deg", 30.0)))
+                    rel = math.hypot(tgt.vel[0] - me["vel"][0], tgt.vel[1] - me["vel"][1]) if tgt is not None else 0.0
+                    if (sol.dist < float(wst.get("range", 45.0)) - 1.0 - 0.05 * rel
+                            and abs(angdiff(sol.hit_yaw, my_aim[0])) - turn_r * 0.9 < cone * 0.4
                             and energy >= float(wst.get("energy", 3.0))):
                         fire[i] = True
                 elif k == "laser":

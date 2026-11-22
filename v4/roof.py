@@ -221,7 +221,9 @@ class Roofs:
         x, y, z = me["pos"]
         z_info = ctx.zone
         late = float(z_info.get("next_radius", 999.0)) < 60.0
-        want = j.retreat and not late
+        # only under pressure: retreating, or our cell is hot (several watching) and we are hurt
+        hp_frac = me["hp"] / max(1.0, me["max_hp"])
+        want = not late and (j.retreat or (j.pressed and hp_frac < 0.7))
         under = any(t - h[0] < 1.0 and h[3] != "zone" for h in ctx.mem.hits)
         if want or under:
             self.watched_t = t

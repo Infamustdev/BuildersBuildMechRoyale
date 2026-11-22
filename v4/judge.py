@@ -60,6 +60,7 @@ GUN_LEAD = 0.45           # fraction of the velocity lead to use on mechs (half 
 class Solution:
     """Firing solution on the current target."""
     __slots__ = ("dist", "gun_yaw", "gun_pitch", "gun_ok", "hit_yaw", "hit_pitch", "tol_y", "tol_p",
+                 "gun_tol_y", "gun_tol_p", "las_tol_y", "las_tol_p",
                  "hitscan", "lethal", "is_mech")
 
 
@@ -424,7 +425,9 @@ class Judge:
             gst = gun.get("stats") or {}
             lv = (tv[0] * GUN_LEAD, tv[1] * GUN_LEAD, tv[2] * GUN_LEAD) if tr is not None else tv
             s.gun_yaw, s.gun_pitch = self._lead(muzzle, tp, lv, float(gst.get("speed", 252.0)), abs(tv[2]) < 0.5)
-            s.gun_ok = dist <= float(gst.get("range", 180.0)) * 0.96
+            # mechs out to range - 5 m (230 cap); drones and crates only inside 120 m
+            gmax = min(float(gst.get("range", 230.0)) - 5.0, 230.0 if tr is not None else 120.0)
+            s.gun_ok = dist <= gmax
         lat = AIM_LATENCY + self.tick_s
         dp = (tp[0] + tv[0] * lat, tp[1] + tv[1] * lat, tp[2])
         s.hit_yaw = math.atan2(dp[1] - muzzle[1], dp[0] - muzzle[0])
@@ -433,6 +436,11 @@ class Judge:
             s.gun_yaw, s.gun_pitch = s.hit_yaw, s.hit_pitch
         s.tol_y = math.atan2(r * 0.75, max(dist, 1.0))
         s.tol_p = math.atan2(h * 0.40, max(dist, 1.0))
+        # trigger windows (measured): gun 2.2 x radius / 0.72 x height, laser 2.0 x / 0.68 x
+        s.gun_tol_y = math.atan2(r * 2.2, max(dist, 1.0))
+        s.gun_tol_p = math.atan2(h * 0.72, max(dist, 1.0))
+        s.las_tol_y = math.atan2(r * 2.0, max(dist, 1.0))
+        s.las_tol_p = math.atan2(h * 0.68, max(dist, 1.0))
         # Laser: the torso switches to the hitscan aim once the charge is past 45%, or when an
         # early release would already kill (damage x 0.70 >= target HP).
         s.hitscan, s.lethal = False, False

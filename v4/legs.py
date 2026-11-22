@@ -29,7 +29,7 @@ whatever move was chosen (not during escape or unstick).
 import heapq
 import math
 
-from roof import Roofs
+# from roof import Roofs   # roof play disabled
 
 
 def unit(dx, dy):
@@ -60,7 +60,7 @@ HUNT_ARRIVE_M = 15.0   # reaching a hunt spot this close bans it, so we move on
 class Legs:
     def __init__(self, wm, rng, fight, evade, cfg):
         self.wm = wm
-        self.roof = Roofs(wm)
+        # self.roof = Roofs(wm)   # roof play disabled
         self.fight = fight
         self.evade = evade
         self.rng = rng
@@ -238,11 +238,11 @@ class Legs:
             return self.unstick_dir, False, False
         energy = float(me.get("energy", 0.0))
         # roof play: retreat up onto a roof and heal out of sight behind its edge
-        rs = self.roof.step(ctx, lambda gx, gy: self._route(ctx, px, py, gx, gy, "roof"))
-        if rs is not None:
-            self.mode = self.roof.mode
-            self.hist = []
-            return rs
+        # rs = self.roof.step(ctx, lambda gx, gy: self._route(ctx, px, py, gx, gy, "roof"))
+        # if rs is not None:
+        #     self.mode = self.roof.mode
+        #     self.hist = []
+        #     return rs
         sh = self.evade.shell(ctx)
         if sh is not None:
             self.mode = "shell"
@@ -355,6 +355,19 @@ class Legs:
                 return self._route(ctx, px, py, scoop[0], scoop[1], "cube"), False
             mv, boost = self.fight.decide(ctx, foe)
             self.mode = "cornered" if j.retreat else self.fight.mode
+            self.goal = None
+            return mv, boost
+
+        # pest: a drone shooting at us blocks our regen and is worth two cubes: kill it
+        pest, pd = None, 1e18
+        for tr in ctx.mem.tracks.values():
+            if tr.kind == "npc" and t - tr.last_hit_us_t < 4.0 and t - tr.seen_t < 3.0:
+                d = math.hypot(tr.pos[0] - px, tr.pos[1] - py)
+                if d < pd:
+                    pest, pd = tr, d
+        if pest is not None:
+            mv, boost = self.fight.decide(ctx, pest)
+            self.mode = "pest"
             self.goal = None
             return mv, boost
 

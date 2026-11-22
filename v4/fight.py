@@ -17,7 +17,9 @@ import math
 from judge import Judge
 
 RING_MIN, RING_MAX = 3.0, 9.0
-GUN_R, LASER_R, LIGHT_R, FINISH_R = 85.0, 120.0, 28.0, 20.0
+GUN_R, LASER_R, LIGHT_R, FINISH_R = 30.0, 30.0, 28.0, 20.0
+BAND_MIN, BAND_MAX = 18.0, 42.0   # fight every mech inside this range band (measured best trade)
+STRAFE_MIN_S, STRAFE_MAX_S = 0.12, 0.28
 
 
 REAR_AVOID_W = 35.0
@@ -45,9 +47,9 @@ class Fight:
     def strafe_dir(self, t):
         """Current strafe side (+1/-1), flipped every 0.3-1.0 s like fight movement."""
         if t >= self.strafe_until:
-            if self.rng.random() < 0.6:
+            if self.rng.random() < 0.75:
                 self.strafe = -self.strafe
-            self.strafe_until = t + 0.3 + self.rng.random() * 0.7
+            self.strafe_until = t + STRAFE_MIN_S + self.rng.random() * (STRAFE_MAX_S - STRAFE_MIN_S)
         return self.strafe
 
     def _ring_offsets(self):
@@ -119,9 +121,9 @@ class Fight:
         self.want_los = want
         bx, by = unit(foe.pos[0] - x, foe.pos[1] - y)
         if t >= self.strafe_until:
-            if self.rng.random() < 0.6:
+            if self.rng.random() < 0.75:
                 self.strafe = -self.strafe
-            self.strafe_until = t + 0.3 + self.rng.random() * 0.7
+            self.strafe_until = t + STRAFE_MIN_S + self.rng.random() * (STRAFE_MAX_S - STRAFE_MIN_S)
         sx, sy = -by * self.strafe, bx * self.strafe
         st = me.get("stats") or {}
         mh = float(st.get("muzzle_height", 7.0))
@@ -160,7 +162,11 @@ class Fight:
         for cx, cy, dx, dy, r in cands:
             K = wm.nidx(cx, cy)
             d = math.hypot(foe.pos[0] - cx, foe.pos[1] - cy)
-            s = -1.1 * abs(d - rp) - 0.4 * r
+            if rp in (GUN_R, LASER_R):
+                # anywhere inside the band is as good as anywhere else
+                s = -1.1 * max(0.0, BAND_MIN - d, d - BAND_MAX) - 0.4 * r
+            else:
+                s = -1.1 * abs(d - rp) - 0.4 * r
             cz = wm.nground[K] if K >= 0 else z
             los = wm.los((cx, cy, cz + mh), tc, canopy=False)
             if los:
